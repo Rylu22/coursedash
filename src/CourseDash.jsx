@@ -3839,7 +3839,19 @@ function GroupEditor({ code }) {
                       fontFamily: sans,
                     }}
                   >
-                    <div style={{ fontWeight: 700, fontSize: 12.5, color: settings.historyMode === opt.key ? green : ink }}>{opt.label}</div>
+                    <div
+                      style={{
+                        fontWeight: 700,
+                        fontSize: 12.5,
+                        color: settings.historyMode === opt.key ? green : ink,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 5,
+                      }}
+                    >
+                      {opt.key === "smartWeight" && <Sparkles size={12} />}
+                      {opt.label}
+                    </div>
                     <div style={{ fontSize: 11.5, color: inkSoft, marginTop: 1 }}>{opt.desc}</div>
                   </button>
                 ))}
