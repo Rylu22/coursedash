@@ -34,6 +34,17 @@ const genCode = () => {
   return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 };
 const safeKey = (email) => email.trim().toLowerCase().replace(/[^a-z0-9]/g, "_");
+// Spreadsheet-style column labels for naming test accounts: 0 -> A, 1 -> B, ... 25 -> Z, 26 -> AA...
+function indexToLetters(n) {
+  let s = "";
+  let num = n + 1;
+  while (num > 0) {
+    const rem = (num - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    num = Math.floor((num - 1) / 26);
+  }
+  return s;
+}
 
 // Data model: everything lives in one Postgres table, `kv_store(key text primary
 // key, value jsonb)`, mirroring the original window.storage key/value shape so the
@@ -1539,10 +1550,127 @@ function AdminHome({ onEnterAccount }) {
             </span>
           }
         />
+        <FolderTab active={subTab === "testing"} onClick={() => setSubTab("testing")} icon={Sparkles} label="Testing" />
       </div>
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
-        {subTab === "accounts" ? <AdminDashboard onEnterAccount={onEnterAccount} /> : <AdminMessages onViewed={refreshUnread} />}
+        {subTab === "accounts" && <AdminDashboard onEnterAccount={onEnterAccount} />}
+        {subTab === "messages" && <AdminMessages onViewed={refreshUnread} />}
+        {subTab === "testing" && <AdminTesting onEnterAccount={onEnterAccount} />}
       </div>
+    </div>
+  );
+}
+
+function AdminTesting({ onEnterAccount }) {
+  const [testUsers, setTestUsers] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const load = useCallback(async () => {
+    const keys = await storeList("user:", true);
+    const recs = (await Promise.all(keys.map((k) => storeGet(k, true)))).filter(Boolean);
+    setTestUsers(recs.filter((u) => u.isTest));
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const createTestAccount = async (role) => {
+    setBusy(true);
+    const used = new Set(testUsers.filter((u) => u.role === role).map((u) => u.testLabel));
+    let i = 0;
+    let label = indexToLetters(0);
+    while (used.has(label)) {
+      i++;
+      label = indexToLetters(i);
+    }
+    const roleName = role === "teacher" ? "Teacher" : "Student";
+    const email = `test-${role}-${label.toLowerCase()}@coursedash.test`;
+    const record = { email, name: `${roleName} ${label}`, role, tutorialSeen: true, isTest: true, testLabel: label };
+    await storeSet(`user:${safeKey(email)}`, record, true);
+    await load();
+    setBusy(false);
+  };
+
+  const deleteTestAccount = async (u) => {
+    setBusy(true);
+    await storeDelete(`user:${safeKey(u.email)}`, true);
+    setConfirmDelete(null);
+    await load();
+    setBusy(false);
+  };
+
+  const teachers = (testUsers || []).filter((u) => u.role === "teacher");
+  const students = (testUsers || []).filter((u) => u.role === "student");
+
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: inkSoft, marginTop: -4, marginBottom: 16 }}>
+        Instant test accounts for trying things out — no email or sign-in needed. Click "Enter" to view the app as that account. These are kept separate from real accounts and can be deleted anytime.
+      </p>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <Btn onClick={() => createTestAccount("teacher")} disabled={busy || testUsers === null}>
+          <Plus size={14} /> New test teacher
+        </Btn>
+        <Btn onClick={() => createTestAccount("student")} disabled={busy || testUsers === null}>
+          <Plus size={14} /> New test student
+        </Btn>
+      </div>
+
+      {testUsers === null ? (
+        <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
+      ) : (
+        <>
+          <TestAccountGroup title="Teachers" users={teachers} onEnterAccount={onEnterAccount} onDelete={setConfirmDelete} />
+          <TestAccountGroup title="Students" users={students} onEnterAccount={onEnterAccount} onDelete={setConfirmDelete} />
+        </>
+      )}
+
+      {confirmDelete && (
+        <div
+          onClick={() => !busy && setConfirmDelete(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 340, maxWidth: "100%" }}>
+            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 10px" }}>Delete {confirmDelete.name}?</h3>
+            <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 14 }}>This only removes the test account — it doesn't affect any real accounts or groups.</p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn tone="clay" onClick={() => deleteTestAccount(confirmDelete)} disabled={busy}>
+                {busy ? "Deleting…" : "Delete"}
+              </Btn>
+              <Btn tone="ghost" onClick={() => setConfirmDelete(null)} disabled={busy}>
+                Cancel
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TestAccountGroup({ title, users, onEnterAccount, onDelete }) {
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontSize: 11, fontFamily: mono, letterSpacing: 1, textTransform: "uppercase", color: inkSoft, marginBottom: 8 }}>{title}</div>
+      {users.length === 0 ? (
+        <p style={{ color: inkSoft, fontSize: 13 }}>None yet.</p>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {users.map((u) => (
+            <div key={u.email} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
+              <span style={{ flex: 1, fontWeight: 600 }}>{u.name}</span>
+              <IconBtn tone="green" title="Enter this account" onClick={() => onEnterAccount?.(u)}>
+                <LogIn size={13} /> Enter
+              </IconBtn>
+              <IconBtn tone="clay" title="Delete test account" onClick={() => onDelete(u)}>
+                <Trash2 size={13} />
+              </IconBtn>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1640,7 +1768,7 @@ function AdminDashboard({ onEnterAccount }) {
   const load = useCallback(async () => {
     const userKeys = await storeList("user:", true);
     const userRecs = (await Promise.all(userKeys.map((k) => storeGet(k, true)))).filter(Boolean);
-    setUsers(userRecs);
+    setUsers(userRecs.filter((u) => !u.isTest));
 
     const groupKeys = await storeList("group:", true);
     const groupRecs = (await Promise.all(groupKeys.map((k) => storeGet(k, true).then(normalizeGroup)))).filter(Boolean);
