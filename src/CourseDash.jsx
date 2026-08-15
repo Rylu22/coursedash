@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
-  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap,
+  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye,
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient.js";
 
@@ -867,6 +867,7 @@ function Tutorial({ steps, onDone }) {
 function PasswordBadge({ user, onPasswordChange }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [revealDraft, setRevealDraft] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
@@ -874,6 +875,7 @@ function PasswordBadge({ user, onPasswordChange }) {
 
   const start = () => {
     setDraft("");
+    setRevealDraft(false);
     setErr("");
     setEditing(true);
   };
@@ -895,6 +897,7 @@ function PasswordBadge({ user, onPasswordChange }) {
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <input
           autoFocus
+          type={revealDraft ? "text" : "password"}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -904,6 +907,17 @@ function PasswordBadge({ user, onPasswordChange }) {
           placeholder="New password"
           style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "3px 7px", fontSize: 12.5, fontFamily: mono, width: 130 }}
         />
+        <button
+          onMouseDown={() => setRevealDraft(true)}
+          onMouseUp={() => setRevealDraft(false)}
+          onMouseLeave={() => setRevealDraft(false)}
+          onTouchStart={() => setRevealDraft(true)}
+          onTouchEnd={() => setRevealDraft(false)}
+          title="Hold to reveal"
+          style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", alignItems: "center", padding: 0 }}
+        >
+          <Eye size={13} />
+        </button>
         <button onClick={save} disabled={saving} style={{ background: "none", border: "none", color: green, cursor: "pointer", display: "flex", alignItems: "center", padding: 0 }} title="Save">
           <Check size={14} />
         </button>
@@ -918,7 +932,7 @@ function PasswordBadge({ user, onPasswordChange }) {
   if (user.password) {
     return (
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        CourseDash password: <strong style={{ color: ink, fontFamily: mono }}>{user.password}</strong>
+        CourseDash password: <strong style={{ color: ink, fontFamily: mono, letterSpacing: 1 }}>{"•".repeat(user.password.length)}</strong>
         <button onClick={start} title="Change password" style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", alignItems: "center", padding: 0 }}>
           <Pencil size={12} />
         </button>
