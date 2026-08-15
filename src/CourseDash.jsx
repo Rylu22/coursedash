@@ -3406,6 +3406,14 @@ function GroupEditor({ code }) {
     })();
   }, [loadGroup, loadStudents]);
 
+  // Results can change from outside this screen entirely — e.g. a teacher running
+  // Smart Fit or Accommodate from the Mailbox, which writes straight to storage
+  // without this already-mounted component knowing. Re-fetch every time the
+  // Results tab is opened so it can never show stale data.
+  useEffect(() => {
+    if (tab === "results") loadGroup();
+  }, [tab, loadGroup]);
+
   const updateSetting = async (patch) => {
     const next = { ...settings, ...patch };
     setSettings(next);
@@ -3976,9 +3984,14 @@ function GroupEditor({ code }) {
                   <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
                     Targets are scaled proportionally to the {students.length} student{students.length === 1 ? "" : "s"} who responded — counts below show scaled seats vs. your entered target.
                   </p>
-                  <IconBtn onClick={exportCSV} tone="green">
-                    <Download size={14} /> Export CSV
-                  </IconBtn>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <IconBtn onClick={loadGroup}>
+                      <RefreshCw size={14} /> Refresh
+                    </IconBtn>
+                    <IconBtn onClick={exportCSV} tone="green">
+                      <Download size={14} /> Export CSV
+                    </IconBtn>
+                  </div>
                 </div>
                 {!group.resultsFinalized && (
                   <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 14px", display: "flex", alignItems: "center", gap: 5 }}>
