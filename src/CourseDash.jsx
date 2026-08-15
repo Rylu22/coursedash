@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
@@ -1141,7 +1141,8 @@ export default function App() {
 // Purely decorative technical-drawing-style marks (a thin leader line ending in a
 // small ring terminus) anchored near the viewport edges. Fixed position + zero size
 // wrapper keeps them out of normal layout flow so they can never push or overlap
-// real content; hidden below 1440px where there's no gutter space to put them.
+// real content; hidden below 1860px where there's no gutter space to put them.
+//
 // Deterministic PRNG (not Math.random) so the layout is stable across re-renders
 // instead of reshuffling every time unrelated app state changes.
 function seededRandom(seed) {
@@ -1153,64 +1154,107 @@ function seededRandom(seed) {
   };
 }
 
+// Rounds the interior corners of an axis-aligned polyline by pulling back `r` units
+// before each corner and pushing `r` units past it, joined with a quadratic bezier
+// using the corner itself as the control point.
+function roundedPathFromWaypoints(points, r) {
+  let d = `M${points[0][0]},${points[0][1]}`;
+  for (let i = 1; i < points.length; i++) {
+    const [cx, cy] = points[i];
+    if (i === points.length - 1) {
+      d += ` L${cx},${cy}`;
+      continue;
+    }
+    const [px, py] = points[i - 1];
+    const [nx, ny] = points[i + 1];
+    const len1 = Math.hypot(cx - px, cy - py) || 1;
+    const len2 = Math.hypot(nx - cx, ny - cy) || 1;
+    const rr = Math.min(r, len1 / 2, len2 / 2);
+    const beforeX = cx - ((cx - px) / len1) * rr;
+    const beforeY = cy - ((cy - py) / len1) * rr;
+    const afterX = cx + ((nx - cx) / len2) * rr;
+    const afterY = cy + ((ny - cy) / len2) * rr;
+    d += ` L${beforeX},${beforeY} Q${cx},${cy} ${afterX},${afterY}`;
+  }
+  return d;
+}
+
+const LEADER_MARK_COUNT = 30;
+const LEADER_CORNER_RADIUS = 14;
+
 // Each mark is drawn once assuming it hugs the LEFT edge and reaches inward (+x);
-// right-side copies just mirror the same drawing with a horizontal flip, so the
-// shape math only has to be written once. Every mark is either a straight line or
-// a single rounded 90-degree turn, always ending in the same-size ring terminus.
-function buildLeaderMarks(count) {
-  const rand = seededRandom(1337);
+// right-side copies mirror the same drawing with a horizontal flip. Every mark is
+// confined to its own vertical "lane" (a slice of the real, measured viewport
+// height) so marks can never overlap one another, and within a mark the path only
+// ever moves inward and, when it turns, only ever in one consistent vertical
+// direction — a monotonic staircase that can never cross itself. Lines are either
+// straight or have one or two rounded 90-degree turns, always ending in the same
+// ring terminus.
+function buildLeaderMarks(laneHeight, seed) {
+  const rand = seededRandom(seed);
   const marks = [];
-  for (let i = 0; i < count; i++) {
-    const top = Math.max(1, Math.min(99, ((i + 0.5) / count) * 100 + (rand() - 0.5) * (70 / count)));
-    const turn = rand() < 0.55;
+  for (let i = 0; i < LEADER_MARK_COUNT; i++) {
+    const pad = 4;
+    const maxV = laneHeight / 2 - pad;
+    const canTurn = maxV >= 10;
+    const roll = rand();
+    const turns = !canTurn ? 0 : roll < 0.4 ? 0 : roll < 0.75 ? 1 : 2;
     const dir = rand() < 0.5 ? 1 : -1;
-    const hLen = turn ? 150 + rand() * 80 : 200 + rand() * 80;
-    const vLen = turn ? 40 + rand() * 70 : 0;
-    marks.push({ top, turn, dir, hLen, vLen });
+    const baseY = turns === 0 ? laneHeight / 2 : dir === 1 ? pad + 3 : laneHeight - pad - 3;
+
+    const points = [[0, baseY]];
+    let x = 0;
+    let y = baseY;
+    let remainingV = turns > 0 ? Math.max(8, maxV - 3) : 0;
+    for (let t = 0; t < turns; t++) {
+      x += t === 0 ? 100 + rand() * 50 : 35 + rand() * 25;
+      points.push([x, y]);
+      const vLen = t === turns - 1 ? remainingV : remainingV * (0.35 + rand() * 0.3);
+      remainingV -= vLen;
+      y += dir * vLen;
+      points.push([x, y]);
+    }
+    x += turns === 0 ? 200 + rand() * 80 : 25 + rand() * 30;
+    points.push([x, y]);
+
+    marks.push({ d: roundedPathFromWaypoints(points, LEADER_CORNER_RADIUS), width: x + 20, cx: x, cy: y });
   }
   return marks;
 }
 
-const LEADER_MARKS = buildLeaderMarks(30);
-const CORNER_RADIUS = 14;
+function useViewportHeight() {
+  const [h, setH] = useState(() => (typeof window !== "undefined" ? window.innerHeight : 900));
+  useEffect(() => {
+    const onResize = () => setH(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return h;
+}
 
 function LeaderLines() {
-  const Shape = ({ turn, dir, hLen, vLen }) => {
-    if (!turn) {
-      const midY = 20;
-      return (
-        <svg width={hLen + 20} height={40} style={{ overflow: "visible", display: "block" }}>
-          <path d={`M0,${midY} L${hLen},${midY}`} fill="none" stroke={line} strokeWidth={1} />
-          <circle cx={hLen} cy={midY} r={4.5} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
-        </svg>
-      );
-    }
-    const h = vLen + 40;
-    const midY = dir === 1 ? 20 : h - 20;
-    const cornerX = hLen - CORNER_RADIUS;
-    const afterCornerY = midY + dir * CORNER_RADIUS;
-    const endY = midY + dir * vLen;
-    const d = `M0,${midY} L${cornerX},${midY} Q${hLen},${midY} ${hLen},${afterCornerY} L${hLen},${endY}`;
-    return (
-      <svg width={hLen + 20} height={h} style={{ overflow: "visible", display: "block" }}>
-        <path d={d} fill="none" stroke={line} strokeWidth={1} strokeLinecap="round" />
-        <circle cx={hLen} cy={endY} r={4.5} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
+  const viewportH = useViewportHeight();
+  const laneHeight = Math.max(24, viewportH / LEADER_MARK_COUNT);
+  const leftMarks = useMemo(() => buildLeaderMarks(laneHeight, 1337), [laneHeight]);
+  const rightMarks = useMemo(() => buildLeaderMarks(laneHeight, 7331), [laneHeight]);
+
+  const renderMarks = (marks, keyPrefix) =>
+    marks.map((m, i) => (
+      <svg
+        key={`${keyPrefix}${i}`}
+        width={m.width}
+        height={laneHeight}
+        style={{ position: "absolute", top: i * laneHeight, left: 0, overflow: "visible", display: "block" }}
+      >
+        <path d={m.d} fill="none" stroke={line} strokeWidth={1} strokeLinecap="round" />
+        <circle cx={m.cx} cy={m.cy} r={4.5} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
       </svg>
-    );
-  };
+    ));
 
   return (
     <div className="leader-lines">
-      {LEADER_MARKS.map((m, i) => (
-        <div key={`l${i}`} style={{ position: "absolute", top: `${m.top}%`, left: 0 }}>
-          <Shape {...m} />
-        </div>
-      ))}
-      {LEADER_MARKS.map((m, i) => (
-        <div key={`r${i}`} style={{ position: "absolute", top: `${m.top}%`, right: 0, transform: "scaleX(-1)" }}>
-          <Shape {...m} />
-        </div>
-      ))}
+      <div style={{ position: "absolute", inset: 0 }}>{renderMarks(leftMarks, "l")}</div>
+      <div style={{ position: "absolute", inset: 0, transform: "scaleX(-1)" }}>{renderMarks(rightMarks, "r")}</div>
     </div>
   );
 }
