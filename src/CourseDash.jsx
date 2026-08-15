@@ -187,6 +187,52 @@ function moveStudentInResults(results, studentId, fromCourseId, toCourseId) {
   return { ...results, assignments, unassigned };
 }
 
+// Finds one closed rotation among a set of pending switch requests — a cycle of any
+// size where each request's desired course is the next request's current course, so
+// everyone in the ring can move at once without changing any course's headcount. A
+// plain reciprocal swap (Bob wants John's course, John wants Bob's) is just the
+// smallest case, size 2; a 3-way rotation (Bob wants John's, John wants Steve's,
+// Steve wants Bob's) works the same way, and so does any larger ring. Each request
+// needs a `key`, `currentCourseId`, and `toCourseId`. Returns the cycle as an
+// ordered array of requests (apply them in that order), or null if no cycle exists.
+function findRotationCycle(requests) {
+  const byCourse = {};
+  requests.forEach((r) => {
+    if (!byCourse[r.currentCourseId]) byCourse[r.currentCourseId] = [];
+    byCourse[r.currentCourseId].push(r);
+  });
+
+  for (const start of requests) {
+    const startCourse = start.currentCourseId;
+    const visitedKeys = new Set([start.key]);
+    const visitedCourses = new Set([start.currentCourseId, start.toCourseId]);
+    const path = [start];
+
+    const dfs = (currentCourseId) => {
+      const options = byCourse[currentCourseId] || [];
+      for (const r of options) {
+        if (visitedKeys.has(r.key)) continue;
+        if (r.toCourseId === startCourse) {
+          path.push(r);
+          return true;
+        }
+        if (visitedCourses.has(r.toCourseId)) continue;
+        visitedKeys.add(r.key);
+        visitedCourses.add(r.toCourseId);
+        path.push(r);
+        if (dfs(r.toCourseId)) return true;
+        path.pop();
+        visitedKeys.delete(r.key);
+        visitedCourses.delete(r.toCourseId);
+      }
+      return false;
+    };
+
+    if (dfs(start.toCourseId)) return path;
+  }
+  return null;
+}
+
 // Builds a plain-language breakdown of how a specific student ended up where they did —
 // their ranked choices, whether it was a manual override, which logic settings were
 // active, and (for automatic placements into a real course) how much competition that
@@ -757,7 +803,7 @@ const TEACHER_TUTORIAL_STEPS = [
   },
   {
     title: "Mailbox",
-    body: "If you've allowed switch requests, they collect here from every group. Accommodate or Dismiss them one at a time or in bulk, or use Smart Fit to auto-match students who each want what the other already has.",
+    body: "If you've allowed switch requests, they collect here from every group. Accommodate or Dismiss them one at a time or in bulk, or use Smart Fit to auto-match students into closed rotations — pairs or larger — where everyone wants what someone else in the loop already has.",
     preview: (
       <FolderTab
         active={true}
@@ -1514,7 +1560,7 @@ function AboutScreen() {
     },
     {
       title: "Publishing, requests & the mailbox",
-      body: "Run the assignment, then Upload Results to publish it and lock the survey. If you allow it, students get a limited window to request a different course. Every request lands in your Mailbox, where you can Accommodate or Dismiss them individually or in bulk, or let Smart Fit automatically match students who each want what the other already has — a true swap that never changes a course's headcount.",
+      body: "Run the assignment, then Upload Results to publish it and lock the survey. If you allow it, students get a limited window to request a different course. Every request lands in your Mailbox, where you can Accommodate or Dismiss them individually or in bulk, or let Smart Fit automatically resolve closed rotations among them — a reciprocal pair, or a larger ring where each student wants what the next one in the loop already has — a true swap that never changes any course's headcount.",
     },
     {
       title: "Full control over results",
@@ -2620,39 +2666,38 @@ function Mailbox({ user, onResolved }) {
     if (!requests || requests.length === 0) return;
     setBusy(true);
     const byCode = groupByCode(requests);
-    let swapCount = 0;
+    let rotationCount = 0;
     const resolvedKeys = [];
     for (const [code, reqs] of Object.entries(byCode)) {
       const g = normalizeGroup(await storeGet(`group:${code}`, true));
       if (!g || !g.results) continue;
       let results = g.results;
-      const used = new Set();
       let touched = false;
-      for (let i = 0; i < reqs.length; i++) {
-        const a = reqs[i];
-        if (used.has(a.key)) continue;
-        for (let j = i + 1; j < reqs.length; j++) {
-          const b = reqs[j];
-          if (used.has(b.key)) continue;
-          const aCurrent = findCurrentCourseId(results, a.studentId);
-          const bCurrent = findCurrentCourseId(results, b.studentId);
-          if (aCurrent === undefined || bCurrent === undefined || aCurrent === bCurrent) continue;
-          if (a.toCourseId === bCurrent && b.toCourseId === aCurrent) {
-            results = moveStudentInResults(results, a.studentId, aCurrent, b.toCourseId);
-            results = moveStudentInResults(results, b.studentId, bCurrent, a.toCourseId);
-            used.add(a.key);
-            used.add(b.key);
-            resolvedKeys.push(a.key, b.key);
-            swapCount++;
-            touched = true;
-            break;
-          }
-        }
+
+      // currentCourseId is captured once up front (not recomputed mid-rotation) so
+      // that moves within the same closed loop don't interfere with each other.
+      let pool = reqs
+        .map((r) => ({ ...r, currentCourseId: findCurrentCourseId(results, r.studentId) }))
+        .filter((r) => r.currentCourseId !== undefined && r.currentCourseId !== r.toCourseId);
+
+      let cycle;
+      while ((cycle = findRotationCycle(pool))) {
+        cycle.forEach((r) => {
+          results = moveStudentInResults(results, r.studentId, r.currentCourseId, r.toCourseId);
+        });
+        const usedKeys = new Set(cycle.map((r) => r.key));
+        resolvedKeys.push(...usedKeys);
+        pool = pool.filter((r) => !usedKeys.has(r.key));
+        rotationCount++;
+        touched = true;
       }
+
       if (touched) await storeSet(`group:${code}`, { ...g, results }, true);
     }
     await Promise.all(resolvedKeys.map((k) => storeDelete(k, true)));
-    await finishUp(swapCount > 0 ? `Smart Fit matched ${swapCount} swap${swapCount === 1 ? "" : "s"}.` : "No reciprocal swaps were found among pending requests.");
+    await finishUp(
+      rotationCount > 0 ? `Smart Fit matched ${rotationCount} rotation${rotationCount === 1 ? "" : "s"}.` : "No reciprocal swaps were found among pending requests."
+    );
   };
 
   return (
