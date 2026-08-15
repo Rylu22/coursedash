@@ -1019,8 +1019,8 @@ export default function App() {
   };
 
   return (
-    <div style={{ background: paper, minHeight: "100%", padding: "28px 20px", fontFamily: sans, color: ink }}>
-      <div style={{ maxWidth: 880, margin: "0 auto" }}>
+    <div style={{ background: paper, minHeight: "100vh", padding: "28px 20px", fontFamily: sans, color: ink }}>
+      <div style={{ maxWidth: 1180, margin: "0 auto" }}>
         {checkingSession ? (
           <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", marginTop: 60 }}>Loading…</p>
         ) : (
