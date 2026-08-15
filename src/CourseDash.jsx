@@ -864,7 +864,79 @@ function Tutorial({ steps, onDone }) {
   );
 }
 
-function TopBar({ user, onLogout, onBack, onNameChange, onReturnToAdmin }) {
+function PasswordBadge({ user, onPasswordChange }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  if (!onPasswordChange) return null;
+
+  const start = () => {
+    setDraft("");
+    setErr("");
+    setEditing(true);
+  };
+  const cancel = () => {
+    setEditing(false);
+    setErr("");
+  };
+  const save = async () => {
+    if (draft.trim().length < 6) return setErr("At least 6 characters.");
+    setSaving(true);
+    const errMsg = await onPasswordChange(draft.trim());
+    setSaving(false);
+    if (errMsg) return setErr(errMsg);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") cancel();
+          }}
+          placeholder="New password"
+          style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "3px 7px", fontSize: 12.5, fontFamily: mono, width: 130 }}
+        />
+        <button onClick={save} disabled={saving} style={{ background: "none", border: "none", color: green, cursor: "pointer", display: "flex", alignItems: "center", padding: 0 }} title="Save">
+          <Check size={14} />
+        </button>
+        <button onClick={cancel} disabled={saving} style={{ background: "none", border: "none", color: clay, cursor: "pointer", display: "flex", alignItems: "center", padding: 0 }} title="Cancel">
+          <X size={14} />
+        </button>
+        {err && <span style={{ color: clay, fontSize: 11 }}>{err}</span>}
+      </span>
+    );
+  }
+
+  if (user.password) {
+    return (
+      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        CourseDash password: <strong style={{ color: ink, fontFamily: mono }}>{user.password}</strong>
+        <button onClick={start} title="Change password" style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", alignItems: "center", padding: 0 }}>
+          <Pencil size={12} />
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <button
+      onClick={start}
+      style={{ background: "none", border: "none", color: green, cursor: "pointer", fontWeight: 700, fontFamily: sans, fontSize: 12.5, display: "flex", alignItems: "center", gap: 4, padding: 0 }}
+    >
+      <Key size={12} /> Set a CourseDash password
+    </button>
+  );
+}
+
+function TopBar({ user, onLogout, onBack, onNameChange, onPasswordChange, onReturnToAdmin }) {
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -940,6 +1012,7 @@ function TopBar({ user, onLogout, onBack, onNameChange, onReturnToAdmin }) {
                 )}
               </span>
             )}
+            {!editing && <PasswordBadge user={user} onPasswordChange={onPasswordChange} />}
             <button onClick={onLogout} style={{ background: "none", border: "none", color: clay, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: sans, fontSize: 12.5, fontWeight: 700, padding: 0 }}>
               <LogOut size={13} /> Log out
             </button>
@@ -1009,6 +1082,21 @@ export default function App() {
     await storeSet(key, updated, true);
     setUser(updated);
   };
+  // Sets (or replaces) this account's real Supabase Auth password, which is also
+  // what "logging in with a CourseDash password" checks against — the plaintext
+  // copy saved alongside it is only so it can be shown back to the user, since
+  // Supabase itself never returns a password once set.
+  const updateUserPassword = async (newPassword) => {
+    if (!user) return "Not signed in.";
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) return error.message;
+    const key = `user:${safeKey(user.email)}`;
+    const rec = await storeGet(key, true);
+    const updated = { ...(rec || user), password: newPassword };
+    await storeSet(key, updated, true);
+    setUser(updated);
+    return null;
+  };
   const markTutorialSeen = async () => {
     if (!user) return;
     const key = `user:${safeKey(user.email)}`;
@@ -1065,14 +1153,14 @@ export default function App() {
 
         {view === "admin-dashboard" && user && (
           <>
-            <TopBar user={{ ...user, role: "admin" }} onLogout={logout} onNameChange={updateUserName} />
+            <TopBar user={{ ...user, role: "admin" }} onLogout={logout} onNameChange={updateUserName} onPasswordChange={updateUserPassword} />
             <AdminHome onEnterAccount={enterAccount} />
           </>
         )}
 
         {view === "teacher-home" && user && (
           <>
-            <TopBar user={user} onLogout={logout} onNameChange={updateUserName} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TopBar user={user} onLogout={logout} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <TeacherHome
               user={user}
               onOpenGroup={(code) => {
@@ -1087,14 +1175,14 @@ export default function App() {
 
         {view === "teacher-group" && user && activeCode && (
           <>
-            <TopBar user={user} onLogout={logout} onBack={() => setView("teacher-home")} onNameChange={updateUserName} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TopBar user={user} onLogout={logout} onBack={() => setView("teacher-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <GroupEditor code={activeCode} />
           </>
         )}
 
         {view === "student-home" && user && (
           <>
-            <TopBar user={user} onLogout={logout} onNameChange={updateUserName} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TopBar user={user} onLogout={logout} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <StudentHome
               user={user}
               onJoined={(code) => {
@@ -1109,14 +1197,14 @@ export default function App() {
 
         {view === "student-survey" && user && activeCode && (
           <>
-            <TopBar user={user} onLogout={logout} onBack={() => setView("student-home")} onNameChange={updateUserName} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TopBar user={user} onLogout={logout} onBack={() => setView("student-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <StudentSurvey code={activeCode} user={user} onDone={() => setView("student-done")} />
           </>
         )}
 
         {view === "student-done" && user && (
           <>
-            <TopBar user={user} onLogout={logout} onNameChange={updateUserName} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TopBar user={user} onLogout={logout} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <div style={{ textAlign: "center", padding: "50px 10px" }}>
               <Check size={34} color={green} style={{ marginBottom: 10 }} />
               <h2 style={{ fontFamily: serif, fontSize: 22, margin: 0 }}>Your choices are recorded</h2>
@@ -1415,8 +1503,13 @@ function AboutScreen() {
 
 // ---------------- AUTH ----------------
 function AuthScreen({ mode, setMode, onAuthed }) {
-  const [step, setStep] = useState("form"); // form | code
+  // step: form | code — the OTP flow, used for all of signup and for login when
+  // loginMethod is "otp". loginMethod only matters in "login" mode; login defaults
+  // to password, with "Try another way" switching it to the OTP flow.
+  const [step, setStep] = useState("form");
+  const [loginMethod, setLoginMethod] = useState("password");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState("student");
@@ -1424,11 +1517,44 @@ function AuthScreen({ mode, setMode, onAuthed }) {
   const [busy, setBusy] = useState(false);
 
   const cleanEmail = () => email.trim().toLowerCase();
+  const resetToStart = (nextMode) => {
+    setMode(nextMode);
+    setStep("form");
+    setLoginMethod("password");
+    setPassword("");
+    setCode("");
+    setError("");
+  };
+
+  const loadProfile = async () => {
+    const record = await storeGet(`user:${safeKey(email)}`, true);
+    if (!record) return setError("No profile found for this account — contact an admin.");
+    onAuthed(record);
+  };
+
+  const passwordLogin = async () => {
+    setError("");
+    if (!email.trim() || !password) return setError("Enter your email and password.");
+    setBusy(true);
+    try {
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email: cleanEmail(), password });
+      if (signInError) return setError("Incorrect email or password — or you haven't set a CourseDash password yet. Try a verification code instead.");
+      await loadProfile();
+    } catch (err) {
+      console.error("Password login error:", err);
+      setError("Something went wrong. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const sendCode = async () => {
     setError("");
     if (!email.trim()) return setError("Enter your email.");
-    if (mode === "signup" && !name.trim()) return setError("Enter your name.");
+    if (mode === "signup") {
+      if (!name.trim()) return setError("Enter your name.");
+      if (password.trim().length < 6) return setError("Choose a CourseDash password of at least 6 characters.");
+    }
     setBusy(true);
     try {
       const key = `user:${safeKey(email)}`;
@@ -1459,14 +1585,17 @@ function AuthScreen({ mode, setMode, onAuthed }) {
       if (verifyError) return setError("That code is incorrect or expired.");
       const key = `user:${safeKey(email)}`;
       if (mode === "signup") {
-        const record = { email: cleanEmail(), name: name.trim(), role, tutorialSeen: false };
+        // Best-effort: also set this as their real Supabase Auth password, so
+        // future logins can use it directly instead of requesting a new code each
+        // time. If it fails, they still get in (OTP already verified them) — they
+        // can set a password later from their dashboard.
+        const { error: pwError } = await supabase.auth.updateUser({ password: password.trim() });
+        const record = { email: cleanEmail(), name: name.trim(), role, tutorialSeen: false, ...(pwError ? {} : { password: password.trim() }) };
         const saved = await storeSet(key, record, true);
         if (!saved) return setError("Couldn't save your account — check your connection and try again.");
         onAuthed(record);
       } else {
-        const record = await storeGet(key, true);
-        if (!record) return setError("No profile found for this account — contact an admin.");
-        onAuthed(record);
+        await loadProfile();
       }
     } catch (err) {
       console.error("Verify code error:", err);
@@ -1480,7 +1609,42 @@ function AuthScreen({ mode, setMode, onAuthed }) {
     <div style={{ maxWidth: 380, margin: "40px auto 0" }}>
       <Header eyebrow="Course Assignment Roster" title={mode === "login" ? "Log in" : "Create an account"} />
       <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 10, padding: 20 }}>
-        {step === "form" ? (
+        {mode === "login" && loginMethod === "password" ? (
+          <>
+            <Field label="Email">
+              <input style={inputStyle} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@school.edu" />
+            </Field>
+            <Field label="CourseDash password">
+              <input
+                style={inputStyle}
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                onKeyDown={(e) => e.key === "Enter" && passwordLogin()}
+              />
+            </Field>
+            {error && (
+              <div style={{ color: clay, fontSize: 12.5, marginBottom: 10, display: "flex", gap: 6 }}>
+                <AlertTriangle size={13} style={{ marginTop: 1, flexShrink: 0 }} /> {error}
+              </div>
+            )}
+            <Btn onClick={passwordLogin} full disabled={busy}>
+              {busy ? "Logging in…" : "Log in"}
+            </Btn>
+            <button
+              type="button"
+              onClick={() => {
+                setLoginMethod("otp");
+                setPassword("");
+                setError("");
+              }}
+              style={{ background: "none", border: "none", color: inkSoft, fontSize: 12.5, cursor: "pointer", fontFamily: sans, marginTop: 10, display: "block", width: "100%", textAlign: "center" }}
+            >
+              Try another way — use a verification code
+            </button>
+          </>
+        ) : step === "form" ? (
           <>
             {mode === "signup" && (
               <Field label="Name">
@@ -1490,6 +1654,11 @@ function AuthScreen({ mode, setMode, onAuthed }) {
             <Field label="Email">
               <input style={inputStyle} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@school.edu" />
             </Field>
+            {mode === "signup" && (
+              <Field label="Create a CourseDash password">
+                <input style={inputStyle} type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" />
+              </Field>
+            )}
             {mode === "signup" && (
               <Field label="I am a...">
                 <div style={{ display: "flex", gap: 8 }}>
@@ -1526,6 +1695,18 @@ function AuthScreen({ mode, setMode, onAuthed }) {
             <Btn onClick={sendCode} full disabled={busy}>
               {busy ? "Sending…" : "Send me a code"}
             </Btn>
+            {mode === "login" && (
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginMethod("password");
+                  setError("");
+                }}
+                style={{ background: "none", border: "none", color: inkSoft, fontSize: 12.5, cursor: "pointer", fontFamily: sans, marginTop: 10, display: "block", width: "100%", textAlign: "center" }}
+              >
+                Use my CourseDash password instead
+              </button>
+            )}
           </>
         ) : (
           <>
@@ -1568,14 +1749,14 @@ function AuthScreen({ mode, setMode, onAuthed }) {
         {mode === "login" ? (
           <>
             No account?{" "}
-            <button onClick={() => { setMode("signup"); setStep("form"); setError(""); }} style={{ background: "none", border: "none", color: green, fontWeight: 700, cursor: "pointer", fontFamily: sans }}>
+            <button onClick={() => resetToStart("signup")} style={{ background: "none", border: "none", color: green, fontWeight: 700, cursor: "pointer", fontFamily: sans }}>
               Sign up
             </button>
           </>
         ) : (
           <>
             Have an account?{" "}
-            <button onClick={() => { setMode("login"); setStep("form"); setError(""); }} style={{ background: "none", border: "none", color: green, fontWeight: 700, cursor: "pointer", fontFamily: sans }}>
+            <button onClick={() => resetToStart("login")} style={{ background: "none", border: "none", color: green, fontWeight: 700, cursor: "pointer", fontFamily: sans }}>
               Log in
             </button>
           </>
