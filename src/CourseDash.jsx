@@ -3578,16 +3578,16 @@ function GroupEditor({ code }) {
         <div onClick={() => !finalizing && setConfirmFinalize(false)} style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 360, maxWidth: "100%" }}>
             <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: clay, textTransform: "uppercase" }}>This can't be undone</div>
-            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 8px" }}>Finalize this group's results?</h3>
+            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 8px" }}>Are you sure you want to finalize these results?</h3>
             <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 14 }}>
-              No more manual drag adjustments will be possible, and any pending switch requests for this group will be cleared without being acted on.
+              Finalizing permanently locks this group's results. No more manual drag adjustments will be possible, any pending switch requests for this group will be cleared without being acted on, and switch requests can no longer be submitted or accommodated. Students keep seeing their result in Active Groups, but nothing about it can change afterward.
             </p>
             <div style={{ display: "flex", gap: 8 }}>
               <Btn tone="clay" onClick={finalizeResults} disabled={finalizing}>
-                {finalizing ? "Finalizing…" : "Finalize"}
+                {finalizing ? "Finalizing…" : "Confirm Finalize"}
               </Btn>
               <Btn tone="ghost" onClick={() => setConfirmFinalize(false)} disabled={finalizing}>
-                Cancel
+                Decline - Go Back
               </Btn>
             </div>
           </div>
