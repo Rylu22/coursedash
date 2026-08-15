@@ -1142,39 +1142,59 @@ export default function App() {
 // small ring terminus) anchored near the viewport edges. Fixed position + zero size
 // wrapper keeps them out of normal layout flow so they can never push or overlap
 // real content; hidden below 1440px where there's no gutter space to put them.
+// Deterministic PRNG (not Math.random) so the layout is stable across re-renders
+// instead of reshuffling every time unrelated app state changes.
+function seededRandom(seed) {
+  let s = seed % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return function next() {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
 // Each mark is drawn once assuming it hugs the LEFT edge and reaches inward (+x);
 // right-side copies just mirror the same drawing with a horizontal flip, so the
-// shape math only has to be written once.
-const LEADER_MARKS = [
-  { top: 6, len: 150, h: 50, shape: "line", curveDir: 0, terminus: "ring" },
-  { top: 22, len: 210, h: 90, shape: "curve", curveDir: 1, terminus: "dot" },
-  { top: 41, len: 120, h: 34, shape: "line", curveDir: 0, terminus: "cross" },
-  { top: 58, len: 185, h: 76, shape: "curve", curveDir: -1, terminus: "ring" },
-  { top: 76, len: 100, h: 26, shape: "line", curveDir: 0, terminus: "dot" },
-  { top: 91, len: 160, h: 64, shape: "curve", curveDir: 1, terminus: "ring" },
-];
+// shape math only has to be written once. Every mark is either a straight line or
+// a single rounded 90-degree turn, always ending in the same-size ring terminus.
+function buildLeaderMarks(count) {
+  const rand = seededRandom(1337);
+  const marks = [];
+  for (let i = 0; i < count; i++) {
+    const top = Math.max(1, Math.min(99, ((i + 0.5) / count) * 100 + (rand() - 0.5) * (70 / count)));
+    const turn = rand() < 0.55;
+    const dir = rand() < 0.5 ? 1 : -1;
+    const hLen = turn ? 150 + rand() * 80 : 200 + rand() * 80;
+    const vLen = turn ? 40 + rand() * 70 : 0;
+    marks.push({ top, turn, dir, hLen, vLen });
+  }
+  return marks;
+}
+
+const LEADER_MARKS = buildLeaderMarks(30);
+const CORNER_RADIUS = 14;
 
 function LeaderLines() {
-  const drawTerminus = (type, cx, cy) => {
-    if (type === "dot") return <circle cx={cx} cy={cy} r={3} fill={gold} />;
-    if (type === "cross")
+  const Shape = ({ turn, dir, hLen, vLen }) => {
+    if (!turn) {
+      const midY = 20;
       return (
-        <>
-          <line x1={cx - 5} y1={cy} x2={cx + 5} y2={cy} stroke={inkSoft} strokeWidth={1.2} />
-          <line x1={cx} y1={cy - 5} x2={cx} y2={cy + 5} stroke={inkSoft} strokeWidth={1.2} />
-        </>
+        <svg width={hLen + 20} height={40} style={{ overflow: "visible", display: "block" }}>
+          <path d={`M0,${midY} L${hLen},${midY}`} fill="none" stroke={line} strokeWidth={1} />
+          <circle cx={hLen} cy={midY} r={4.5} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
+        </svg>
       );
-    return <circle cx={cx} cy={cy} r={4.5} fill={paper} stroke={inkSoft} strokeWidth={1.2} />;
-  };
-
-  const Shape = ({ len, h, shape, curveDir, terminus }) => {
-    const midY = h / 2;
-    const endY = curveDir === 0 ? midY : midY + curveDir * (h / 2 - 6);
-    const d = shape === "line" ? `M0,${midY} L${len},${endY}` : `M0,${midY} Q${len * 0.55},${midY + curveDir * (h / 2)} ${len},${endY}`;
+    }
+    const h = vLen + 40;
+    const midY = dir === 1 ? 20 : h - 20;
+    const cornerX = hLen - CORNER_RADIUS;
+    const afterCornerY = midY + dir * CORNER_RADIUS;
+    const endY = midY + dir * vLen;
+    const d = `M0,${midY} L${cornerX},${midY} Q${hLen},${midY} ${hLen},${afterCornerY} L${hLen},${endY}`;
     return (
-      <svg width={len + 20} height={h} style={{ overflow: "visible", display: "block" }}>
-        <path d={d} fill="none" stroke={line} strokeWidth={1} />
-        {drawTerminus(terminus, len, endY)}
+      <svg width={hLen + 20} height={h} style={{ overflow: "visible", display: "block" }}>
+        <path d={d} fill="none" stroke={line} strokeWidth={1} strokeLinecap="round" />
+        <circle cx={hLen} cy={endY} r={4.5} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
       </svg>
     );
   };
