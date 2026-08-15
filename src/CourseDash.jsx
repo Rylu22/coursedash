@@ -3184,23 +3184,33 @@ function GroupEditor({ code }) {
                 <RefreshCw size={13} /> {loadingStudents ? "Loading…" : "Refresh"}
               </IconBtn>
             </div>
-            {students.length > 5 && (
+            {students.length > 0 && (
               <div style={{ position: "relative", marginBottom: 10 }}>
                 <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: inkSoft }} />
                 <input
                   value={studentSearch}
                   onChange={(e) => setStudentSearch(e.target.value)}
-                  placeholder="Search students by name…"
+                  placeholder="Search students by name or email…"
                   style={{ ...inputStyle, paddingLeft: 30, fontSize: 13 }}
                 />
               </div>
             )}
             <div style={{ display: "grid", gap: 8 }}>
               {students
-                .filter((s) => !studentSearch.trim() || s.name.toLowerCase().includes(studentSearch.trim().toLowerCase()))
+                .filter((s) => {
+                  const q = studentSearch.trim().toLowerCase();
+                  return !q || s.name.toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
+                })
                 .map((s) => (
                   <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
-                    <span style={{ flex: 1, fontWeight: 600 }}>{s.name}</span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ fontWeight: 600 }}>{s.name}</span>
+                      {s.email && (
+                        <span style={{ display: "block", fontSize: 11.5, color: inkSoft, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {s.email}
+                        </span>
+                      )}
+                    </span>
                     <PriorityBadge scores={priority[s.id]} />
                     <span style={{ fontFamily: mono, color: inkSoft, fontSize: 12 }}>Grade {s.grade}</span>
                     <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>
@@ -3212,9 +3222,12 @@ function GroupEditor({ code }) {
                   </div>
                 ))}
               {students.length === 0 && <p style={{ color: inkSoft, fontSize: 13 }}>No responses yet.</p>}
-              {students.length > 0 && studentSearch.trim() && !students.some((s) => s.name.toLowerCase().includes(studentSearch.trim().toLowerCase())) && (
-                <p style={{ color: inkSoft, fontSize: 13 }}>No students match "{studentSearch}".</p>
-              )}
+              {students.length > 0 &&
+                studentSearch.trim() &&
+                !students.some((s) => {
+                  const q = studentSearch.trim().toLowerCase();
+                  return s.name.toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
+                }) && <p style={{ color: inkSoft, fontSize: 13 }}>No students match "{studentSearch}".</p>}
             </div>
           </div>
         )}
@@ -4008,7 +4021,7 @@ function StudentSurvey({ code, user, onDone }) {
     if (new Set(chosen).size < choiceCount) return setError(`Choose ${choiceCount} different courses.`);
     setBusy(true);
     const key = `submission:${code}:${safeKey(user.email)}`;
-    await storeSet(key, { id: safeKey(user.email), name: user.name, grade: Number(grade), prefs: chosen }, true);
+    await storeSet(key, { id: safeKey(user.email), name: user.name, email: user.email, grade: Number(grade), prefs: chosen }, true);
     // Track which groups this student has responded to, so their "Active Groups"
     // tab can find these without scanning every group in storage.
     const indexKey = `student-groups:${safeKey(user.email)}`;
