@@ -215,7 +215,7 @@ const DEFAULT_LOGIC_SETTINGS = {
   useHistory: true,
   gradeDirection: "higher", // "higher" | "lower"
   order: ["history", "grade"], // tie-break priority order
-  historyMode: "boost", // "boost" | "sameCourse" | "differentCourse"
+  historyMode: "boost", // "boost" | "sameCourse" | "differentCourse" | "smartWeight"
   allowRequests: true,
   requestWindowDays: 3,
 };
@@ -395,6 +395,11 @@ function assignStudents(courses, students, priority = {}, settings = {}) {
 //    counting consecutive years spent in that same course.
 //  - "differentCourse": priority for a specific course they ranked before but did NOT get,
 //    encouraging rotation into something they wanted but missed.
+//  - "smartWeight": an accumulated "how far from their top choice have they landed" score,
+//    summed across every prior group in the series (not just a streak) — 1st choice adds 1,
+//    2nd adds 4, 3rd adds 6, anything else (an unranked course, or no course at all) adds 10.
+//    A student who's never been in a prior group of this series scores 0. Whoever has
+//    accumulated the highest total gets priority this year.
 async function computeHistoryPriority(group, students, mode = "boost") {
   const priority = {};
   if (!group.chainId) return priority;
@@ -469,6 +474,33 @@ async function computeHistoryPriority(group, students, mode = "boost") {
         if (streak > 0) scores[cname] = streak;
       });
       if (Object.keys(scores).length) priority[student.id] = scores;
+    }
+  } else if (mode === "smartWeight") {
+    const POINTS = { 1: 1, 2: 4, 3: 6 };
+    for (const student of students) {
+      let total = 0;
+      for (const pg of priorGroups) {
+        if (!pg?.results) continue; // no assignment run that year — no signal, skip it
+        let found = null;
+        for (const arr of Object.values(pg.results.assignments)) {
+          const match = arr.find((s) => s.id === student.id);
+          if (match) {
+            found = match;
+            break;
+          }
+        }
+        if (!found) {
+          const missed = pg.results.unassigned.find((s) => s.id === student.id);
+          if (missed) found = { choiceRank: null };
+        }
+        if (!found) continue; // wasn't part of this particular prior group at all
+        total += POINTS[found.choiceRank] ?? 10; // unranked course, or unassigned, or 4th+ choice
+      }
+      if (total > 0) {
+        const scores = {};
+        (group.courses || []).forEach((c) => (scores[c.name] = total));
+        priority[student.id] = scores;
+      }
     }
   } else {
     // "boost": flat streak of missing #1 choice, applied broadly to any course this year.
@@ -3788,6 +3820,11 @@ function GroupEditor({ code }) {
                   { key: "boost", label: "Boost generally", desc: "Missing #1 choice in past years gives priority for whatever they rank this year." },
                   { key: "sameCourse", label: "Same course as before", desc: "Priority for the specific course they were placed in previously, if they rank it again." },
                   { key: "differentCourse", label: "A course they missed before", desc: "Priority for a specific course they ranked before but didn't get, if they rank it again." },
+                  {
+                    key: "smartWeight",
+                    label: "Smart Weight Analysis",
+                    desc: "Adds up how far from their top choice they've landed across every past year in this series (1st = 1, 2nd = 4, 3rd = 6, unranked = 10) — highest total gets priority this year.",
+                  },
                 ].map((opt) => (
                   <button
                     key={opt.key}
