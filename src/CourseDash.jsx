@@ -1142,28 +1142,55 @@ export default function App() {
 // small ring terminus) anchored near the viewport edges. Fixed position + zero size
 // wrapper keeps them out of normal layout flow so they can never push or overlap
 // real content; hidden below 1440px where there's no gutter space to put them.
+// Each mark is drawn once assuming it hugs the LEFT edge and reaches inward (+x);
+// right-side copies just mirror the same drawing with a horizontal flip, so the
+// shape math only has to be written once.
+const LEADER_MARKS = [
+  { top: 6, len: 150, h: 50, shape: "line", curveDir: 0, terminus: "ring" },
+  { top: 22, len: 210, h: 90, shape: "curve", curveDir: 1, terminus: "dot" },
+  { top: 41, len: 120, h: 34, shape: "line", curveDir: 0, terminus: "cross" },
+  { top: 58, len: 185, h: 76, shape: "curve", curveDir: -1, terminus: "ring" },
+  { top: 76, len: 100, h: 26, shape: "line", curveDir: 0, terminus: "dot" },
+  { top: 91, len: 160, h: 64, shape: "curve", curveDir: 1, terminus: "ring" },
+];
+
 function LeaderLines() {
-  const Mark = ({ side, top }) => (
-    <svg width={96} height={24} style={{ position: "absolute", top: `${top}%`, [side]: 0, overflow: "visible" }}>
-      {side === "left" ? (
+  const drawTerminus = (type, cx, cy) => {
+    if (type === "dot") return <circle cx={cx} cy={cy} r={3} fill={gold} />;
+    if (type === "cross")
+      return (
         <>
-          <line x1={0} y1={12} x2={70} y2={12} stroke={line} strokeWidth={1} />
-          <circle cx={76} cy={12} r={4} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
+          <line x1={cx - 5} y1={cy} x2={cx + 5} y2={cy} stroke={inkSoft} strokeWidth={1.2} />
+          <line x1={cx} y1={cy - 5} x2={cx} y2={cy + 5} stroke={inkSoft} strokeWidth={1.2} />
         </>
-      ) : (
-        <>
-          <line x1={26} y1={12} x2={96} y2={12} stroke={line} strokeWidth={1} />
-          <circle cx={20} cy={12} r={4} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
-        </>
-      )}
-    </svg>
-  );
+      );
+    return <circle cx={cx} cy={cy} r={4.5} fill={paper} stroke={inkSoft} strokeWidth={1.2} />;
+  };
+
+  const Shape = ({ len, h, shape, curveDir, terminus }) => {
+    const midY = h / 2;
+    const endY = curveDir === 0 ? midY : midY + curveDir * (h / 2 - 6);
+    const d = shape === "line" ? `M0,${midY} L${len},${endY}` : `M0,${midY} Q${len * 0.55},${midY + curveDir * (h / 2)} ${len},${endY}`;
+    return (
+      <svg width={len + 20} height={h} style={{ overflow: "visible", display: "block" }}>
+        <path d={d} fill="none" stroke={line} strokeWidth={1} />
+        {drawTerminus(terminus, len, endY)}
+      </svg>
+    );
+  };
+
   return (
     <div className="leader-lines">
-      <Mark side="left" top={20} />
-      <Mark side="left" top={72} />
-      <Mark side="right" top={20} />
-      <Mark side="right" top={72} />
+      {LEADER_MARKS.map((m, i) => (
+        <div key={`l${i}`} style={{ position: "absolute", top: `${m.top}%`, left: 0 }}>
+          <Shape {...m} />
+        </div>
+      ))}
+      {LEADER_MARKS.map((m, i) => (
+        <div key={`r${i}`} style={{ position: "absolute", top: `${m.top}%`, right: 0, transform: "scaleX(-1)" }}>
+          <Shape {...m} />
+        </div>
+      ))}
     </div>
   );
 }
