@@ -1030,7 +1030,17 @@ export default function App() {
   };
 
   return (
-    <div style={{ background: paper, minHeight: "100vh", padding: "28px 20px", fontFamily: sans, color: ink }}>
+    <div
+      style={{
+        background: paper,
+        backgroundImage: `radial-gradient(${line} 1px, transparent 1px)`,
+        backgroundSize: "22px 22px",
+        minHeight: "100vh",
+        padding: "28px 20px",
+        fontFamily: sans,
+        color: ink,
+      }}
+    >
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
         {checkingSession ? (
           <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", marginTop: 60 }}>Loading…</p>
@@ -1190,9 +1200,6 @@ function HomeScreen({ onGetStarted }) {
         padding: "70px 20px 40px",
         maxWidth: 540,
         margin: "0 auto",
-        backgroundImage: `radial-gradient(${line} 1px, transparent 1px)`,
-        backgroundSize: "22px 22px",
-        backgroundPosition: "center top",
       }}
     >
       <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
