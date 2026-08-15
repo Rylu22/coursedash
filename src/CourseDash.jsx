@@ -1530,14 +1530,14 @@ function AuthScreen({ mode, setMode, onAuthed }) {
         ) : (
           <>
             <p style={{ fontSize: 12.5, color: inkSoft, marginTop: -4, marginBottom: 14 }}>
-              We sent a 6-digit code to <strong style={{ color: ink }}>{cleanEmail()}</strong>. Enter it below.
+              We sent an 8-digit code to <strong style={{ color: ink }}>{cleanEmail()}</strong>. Enter it below.
             </p>
             <Field label="Code">
               <input
                 style={{ ...inputStyle, fontFamily: mono, letterSpacing: 2, textAlign: "center" }}
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
-                placeholder="123456"
+                placeholder="ABCDEFGH"
                 inputMode="numeric"
                 autoFocus
               />
