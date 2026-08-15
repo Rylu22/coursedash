@@ -1041,6 +1041,7 @@ export default function App() {
         color: ink,
       }}
     >
+      {(view === "home" || view === "about" || view === "teacher-home" || view === "student-home") && <LeaderLines />}
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
         {checkingSession ? (
           <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", marginTop: 60 }}>Loading…</p>
@@ -1133,6 +1134,36 @@ export default function App() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// Purely decorative technical-drawing-style marks (a thin leader line ending in a
+// small ring terminus) anchored near the viewport edges. Fixed position + zero size
+// wrapper keeps them out of normal layout flow so they can never push or overlap
+// real content; hidden below 1440px where there's no gutter space to put them.
+function LeaderLines() {
+  const Mark = ({ side, top }) => (
+    <svg width={96} height={24} style={{ position: "absolute", top: `${top}%`, [side]: 0, overflow: "visible" }}>
+      {side === "left" ? (
+        <>
+          <line x1={0} y1={12} x2={70} y2={12} stroke={line} strokeWidth={1} />
+          <circle cx={76} cy={12} r={4} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
+        </>
+      ) : (
+        <>
+          <line x1={26} y1={12} x2={96} y2={12} stroke={line} strokeWidth={1} />
+          <circle cx={20} cy={12} r={4} fill={paper} stroke={inkSoft} strokeWidth={1.2} />
+        </>
+      )}
+    </svg>
+  );
+  return (
+    <div className="leader-lines">
+      <Mark side="left" top={20} />
+      <Mark side="left" top={72} />
+      <Mark side="right" top={20} />
+      <Mark side="right" top={72} />
     </div>
   );
 }

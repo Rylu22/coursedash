@@ -23,3 +23,17 @@ body {
 #root > * {
   flex: 1;
 }
+
+.leader-lines {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  display: none;
+}
+
+@media (min-width: 1440px) {
+  .leader-lines {
+    display: block;
+  }
+}
