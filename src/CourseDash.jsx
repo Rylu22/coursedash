@@ -1692,13 +1692,20 @@ function AdminHome({ onEnterAccount }) {
 
 function AdminTesting({ onEnterAccount }) {
   const [testUsers, setTestUsers] = useState(null);
+  const [testGroups, setTestGroups] = useState(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const load = useCallback(async () => {
     const keys = await storeList("user:", true);
     const recs = (await Promise.all(keys.map((k) => storeGet(k, true)))).filter(Boolean);
-    setTestUsers(recs.filter((u) => u.isTest));
+    const tUsers = recs.filter((u) => u.isTest);
+    setTestUsers(tUsers);
+
+    const testTeacherEmails = new Set(tUsers.filter((u) => u.role === "teacher").map((u) => u.email));
+    const groupKeys = await storeList("group:", true);
+    const groupRecs = (await Promise.all(groupKeys.map((k) => storeGet(k, true).then(normalizeGroup)))).filter(Boolean);
+    setTestGroups(groupRecs.filter((g) => testTeacherEmails.has(g.teacherEmail)));
   }, []);
 
   useEffect(() => {
@@ -1733,6 +1740,14 @@ function AdminTesting({ onEnterAccount }) {
   const teachers = (testUsers || []).filter((u) => u.role === "teacher");
   const students = (testUsers || []).filter((u) => u.role === "student");
 
+  const groupsByTeacherEmail = {};
+  teachers.forEach((t) => {
+    groupsByTeacherEmail[t.email] = (testGroups || [])
+      .filter((g) => g.teacherEmail === t.email)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+      .map((g, i) => ({ ...g, testGroupLabel: `${t.testLabel}${i + 1}` }));
+  });
+
   return (
     <div>
       <p style={{ fontSize: 12.5, color: inkSoft, marginTop: -4, marginBottom: 16 }}>
@@ -1751,7 +1766,7 @@ function AdminTesting({ onEnterAccount }) {
         <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
       ) : (
         <>
-          <TestAccountGroup title="Teachers" users={teachers} onEnterAccount={onEnterAccount} onDelete={setConfirmDelete} />
+          <TestAccountGroup title="Teachers" users={teachers} groupsByEmail={groupsByTeacherEmail} onEnterAccount={onEnterAccount} onDelete={setConfirmDelete} />
           <TestAccountGroup title="Students" users={students} onEnterAccount={onEnterAccount} onDelete={setConfirmDelete} />
         </>
       )}
@@ -1779,7 +1794,7 @@ function AdminTesting({ onEnterAccount }) {
   );
 }
 
-function TestAccountGroup({ title, users, onEnterAccount, onDelete }) {
+function TestAccountGroup({ title, users, groupsByEmail, onEnterAccount, onDelete }) {
   return (
     <div style={{ marginBottom: 18 }}>
       <div style={{ fontSize: 11, fontFamily: mono, letterSpacing: 1, textTransform: "uppercase", color: inkSoft, marginBottom: 8 }}>{title}</div>
@@ -1787,17 +1802,44 @@ function TestAccountGroup({ title, users, onEnterAccount, onDelete }) {
         <p style={{ color: inkSoft, fontSize: 13 }}>None yet.</p>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          {users.map((u) => (
-            <div key={u.email} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
-              <span style={{ flex: 1, fontWeight: 600 }}>{u.name}</span>
-              <IconBtn tone="green" title="Enter this account" onClick={() => onEnterAccount?.(u)}>
-                <LogIn size={13} /> Enter
-              </IconBtn>
-              <IconBtn tone="clay" title="Delete test account" onClick={() => onDelete(u)}>
-                <Trash2 size={13} />
-              </IconBtn>
-            </div>
-          ))}
+          {users.map((u) => {
+            const groups = groupsByEmail?.[u.email] || [];
+            return (
+              <div key={u.email} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13.5 }}>
+                  <span style={{ flex: 1, fontWeight: 600 }}>{u.name}</span>
+                  <IconBtn tone="green" title="Enter this account" onClick={() => onEnterAccount?.(u)}>
+                    <LogIn size={13} /> Enter
+                  </IconBtn>
+                  <IconBtn tone="clay" title="Delete test account" onClick={() => onDelete(u)}>
+                    <Trash2 size={13} />
+                  </IconBtn>
+                </div>
+                {groups.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${line}` }}>
+                    {groups.map((g) => (
+                      <div key={g.code} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+                        <span
+                          style={{
+                            fontFamily: mono,
+                            fontSize: 10.5,
+                            fontWeight: 700,
+                            padding: "2px 6px",
+                            borderRadius: 5,
+                            background: "#E4E9F1",
+                            color: inkSoft,
+                          }}
+                        >
+                          {g.testGroupLabel}
+                        </span>
+                        <span>{g.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
