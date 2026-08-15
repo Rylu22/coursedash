@@ -1537,7 +1537,7 @@ function AuthScreen({ mode, setMode, onAuthed }) {
                 style={{ ...inputStyle, fontFamily: mono, letterSpacing: 2, textAlign: "center" }}
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
-                placeholder="ABCDEFGH"
+                placeholder="12345678"
                 inputMode="numeric"
                 autoFocus
               />
