@@ -874,7 +874,7 @@ function PasswordBadge({ user, onPasswordChange }) {
   if (!onPasswordChange) return null;
 
   const start = () => {
-    setDraft("");
+    setDraft(user.password || "");
     setRevealDraft(false);
     setErr("");
     setEditing(true);
