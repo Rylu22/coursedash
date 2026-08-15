@@ -10,6 +10,16 @@ body,
   min-height: 100vh;
 }
 
+html,
 body {
   background: #F3F6FB;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+#root > * {
+  flex: 1;
 }
