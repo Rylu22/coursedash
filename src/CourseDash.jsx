@@ -1952,28 +1952,7 @@ function AdminHome({ user, onEnterAccount }) {
           label={
             <span style={{ position: "relative" }}>
               Messages
-              {unreadCount > 0 && (
-                <span
-                  style={{
-                    position: "absolute",
-                    top: -9,
-                    right: -16,
-                    minWidth: 15,
-                    height: 15,
-                    padding: "0 4px",
-                    borderRadius: 8,
-                    background: clay,
-                    color: "#fff",
-                    fontSize: 9.5,
-                    fontWeight: 700,
-                    lineHeight: "15px",
-                    textAlign: "center",
-                    fontFamily: mono,
-                  }}
-                >
-                  {unreadCount}
-                </span>
-              )}
+              <TabBadge count={unreadCount} />
             </span>
           }
         />
@@ -2657,7 +2636,15 @@ function AdminDashboard({ onEnterAccount }) {
 }
 
 // ---------------- CONTACT ADMIN ----------------
-function ContactAdmin({ user }) {
+// Counts messages admin has sent to this user that they haven't opened their
+// Contact Admin tab to see yet — drives the notification badge on that tab.
+async function countUnreadFromAdmin(email) {
+  const keys = await storeList(`message:${safeKey(email)}:`, true);
+  const msgs = await Promise.all(keys.map((k) => storeGet(k, true)));
+  return msgs.filter((m) => m && m.fromRole === "admin" && !m.read).length;
+}
+
+function ContactAdmin({ user, onViewed }) {
   const [messages, setMessages] = useState(null);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -2669,6 +2656,11 @@ function ContactAdmin({ user }) {
     const msgs = (await Promise.all(keys.map((k) => storeGet(k, true)))).filter(Boolean);
     msgs.sort((a, b) => b.createdAt - a.createdAt);
     setMessages(msgs);
+    const unread = msgs.filter((m) => m.fromRole === "admin" && !m.read);
+    if (unread.length) {
+      await Promise.all(unread.map((m) => storeSet(`message:${safeKey(user.email)}:${m.id}`, { ...m, read: true }, true)));
+    }
+    onViewed?.();
   }, [user.email]);
 
   useEffect(() => {
@@ -2773,9 +2765,37 @@ async function collectTeacherGroupCodes(user) {
   return [...codes];
 }
 
+// Small numbered pill for a FolderTab label, matching the admin Messages badge.
+function TabBadge({ count }) {
+  if (!count) return null;
+  return (
+    <span
+      style={{
+        position: "absolute",
+        top: -9,
+        right: -16,
+        minWidth: 15,
+        height: 15,
+        padding: "0 4px",
+        borderRadius: 8,
+        background: clay,
+        color: "#fff",
+        fontSize: 9.5,
+        fontWeight: 700,
+        lineHeight: "15px",
+        textAlign: "center",
+        fontFamily: mono,
+      }}
+    >
+      {count}
+    </span>
+  );
+}
+
 function TeacherHome({ user, onOpenGroup, showTutorial, onTutorialDone }) {
   const [subTab, setSubTab] = useState("groups");
   const [pendingCount, setPendingCount] = useState(0);
+  const [unreadMessages, setUnreadMessages] = useState(0);
 
   const refreshPending = useCallback(async () => {
     const codes = await collectTeacherGroupCodes(user);
@@ -2783,9 +2803,14 @@ function TeacherHome({ user, onOpenGroup, showTutorial, onTutorialDone }) {
     setPendingCount(counts.reduce((a, b) => a + b, 0));
   }, [user.email]);
 
+  const refreshUnreadMessages = useCallback(async () => {
+    setUnreadMessages(await countUnreadFromAdmin(user.email));
+  }, [user.email]);
+
   useEffect(() => {
     refreshPending();
-  }, [refreshPending]);
+    refreshUnreadMessages();
+  }, [refreshPending, refreshUnreadMessages]);
 
   return (
     <div>
@@ -2799,18 +2824,26 @@ function TeacherHome({ user, onOpenGroup, showTutorial, onTutorialDone }) {
           label={
             <span style={{ position: "relative" }}>
               Mailbox
-              {pendingCount > 0 && (
-                <span style={{ position: "absolute", top: -3, right: -9, width: 7, height: 7, borderRadius: "50%", background: clay }} />
-              )}
+              <TabBadge count={pendingCount} />
             </span>
           }
         />
-        <FolderTab active={subTab === "contact"} onClick={() => setSubTab("contact")} icon={MessageCircle} label="Contact Admin" />
+        <FolderTab
+          active={subTab === "contact"}
+          onClick={() => setSubTab("contact")}
+          icon={MessageCircle}
+          label={
+            <span style={{ position: "relative" }}>
+              Contact Admin
+              <TabBadge count={unreadMessages} />
+            </span>
+          }
+        />
       </div>
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
         {subTab === "groups" && <TeacherDashboard user={user} onOpenGroup={onOpenGroup} />}
         {subTab === "mailbox" && <Mailbox user={user} onResolved={refreshPending} />}
-        {subTab === "contact" && <ContactAdmin user={user} />}
+        {subTab === "contact" && <ContactAdmin user={user} onViewed={refreshUnreadMessages} />}
       </div>
     </div>
   );
@@ -4668,14 +4701,20 @@ async function countNewResults(user) {
 function StudentHome({ user, onJoined, showTutorial, onTutorialDone }) {
   const [subTab, setSubTab] = useState("join");
   const [newResultCount, setNewResultCount] = useState(0);
+  const [unreadMessages, setUnreadMessages] = useState(0);
 
   const refreshNewResults = useCallback(async () => {
     setNewResultCount(await countNewResults(user));
   }, [user.email]);
 
+  const refreshUnreadMessages = useCallback(async () => {
+    setUnreadMessages(await countUnreadFromAdmin(user.email));
+  }, [user.email]);
+
   useEffect(() => {
     refreshNewResults();
-  }, [refreshNewResults]);
+    refreshUnreadMessages();
+  }, [refreshNewResults, refreshUnreadMessages]);
 
   return (
     <div>
@@ -4689,18 +4728,26 @@ function StudentHome({ user, onJoined, showTutorial, onTutorialDone }) {
           label={
             <span style={{ position: "relative" }}>
               Active Groups
-              {newResultCount > 0 && (
-                <span style={{ position: "absolute", top: -3, right: -9, width: 7, height: 7, borderRadius: "50%", background: clay }} />
-              )}
+              <TabBadge count={newResultCount} />
             </span>
           }
         />
-        <FolderTab active={subTab === "contact"} onClick={() => setSubTab("contact")} icon={MessageCircle} label="Contact Admin" />
+        <FolderTab
+          active={subTab === "contact"}
+          onClick={() => setSubTab("contact")}
+          icon={MessageCircle}
+          label={
+            <span style={{ position: "relative" }}>
+              Contact Admin
+              <TabBadge count={unreadMessages} />
+            </span>
+          }
+        />
       </div>
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22, maxWidth: 420, margin: "0 auto" }}>
         {subTab === "join" && <StudentJoin onJoined={onJoined} />}
         {subTab === "active" && <ActiveGroupsList user={user} onEditGroup={onJoined} onViewed={refreshNewResults} />}
-        {subTab === "contact" && <ContactAdmin user={user} />}
+        {subTab === "contact" && <ContactAdmin user={user} onViewed={refreshUnreadMessages} />}
       </div>
     </div>
   );
