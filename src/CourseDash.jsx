@@ -2145,6 +2145,7 @@ function AdminMessages({ adminUser, onViewed }) {
   const [newBody, setNewBody] = useState("");
   const [composeError, setComposeError] = useState("");
   const [composeBusy, setComposeBusy] = useState(false);
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     const keys = await storeList("message:", true);
@@ -2277,9 +2278,10 @@ function AdminMessages({ adminUser, onViewed }) {
   // Opening a conversation marks it read right away, which would otherwise yank it
   // out of the New tab mid-read as soon as that happens. Keep whatever's currently
   // expanded visible in whichever tab it was opened from until it's closed again.
-  const shown = (conversations || []).filter(
-    (c) => c.otherEmail === expandedEmail || (subTab === "new" ? c.unreadCount > 0 : c.unreadCount === 0)
-  );
+  const q = search.trim().toLowerCase();
+  const shown = (conversations || [])
+    .filter((c) => c.otherEmail === expandedEmail || (subTab === "new" ? c.unreadCount > 0 : c.unreadCount === 0))
+    .filter((c) => !q || c.otherName.toLowerCase().includes(q) || c.otherEmail.toLowerCase().includes(q) || c.subject.toLowerCase().includes(q));
 
   return (
     <div>
@@ -2330,10 +2332,20 @@ function AdminMessages({ adminUser, onViewed }) {
         <FolderTab active={subTab === "old"} onClick={() => setSubTab("old")} icon={ClipboardList} label="Old" />
       </div>
 
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={14} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: inkSoft }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by name, email, or subject…"
+          style={{ ...inputStyle, paddingLeft: 34 }}
+        />
+      </div>
+
       {conversations === null ? (
         <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
       ) : shown.length === 0 ? (
-        <p style={{ color: inkSoft, fontSize: 13 }}>{subTab === "new" ? "No new messages." : "Nothing here."}</p>
+        <p style={{ color: inkSoft, fontSize: 13 }}>{q ? "No messages match your search." : subTab === "new" ? "No new messages." : "Nothing here."}</p>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
           {shown.map((c) => {
