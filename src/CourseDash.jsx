@@ -2262,7 +2262,7 @@ function AdminMessages({ adminUser, onViewed }) {
               </div>
             )}
             <div style={{ display: "flex", gap: 8 }}>
-              <Btn onClick={sendNew} disabled={composeBusy}>
+              <Btn onClick={sendNew} disabled={composeBusy || !newTo.trim() || !newSubject.trim() || !newBody.trim()}>
                 {composeBusy ? "Sending…" : "Send"}
               </Btn>
               <Btn
