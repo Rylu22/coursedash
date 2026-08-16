@@ -1249,7 +1249,7 @@ export default function App() {
         {view === "admin-dashboard" && user && (
           <>
             <TopBar user={{ ...user, role: "admin" }} onLogout={logout} onNameChange={updateUserName} onPasswordChange={updateUserPassword} />
-            <AdminHome onEnterAccount={enterAccount} />
+            <AdminHome user={user} onEnterAccount={enterAccount} />
           </>
         )}
 
@@ -1927,14 +1927,14 @@ async function permanentlyDeleteGroup(group) {
 }
 
 // ---------------- ADMIN HOME (Accounts & Groups / Messages) ----------------
-function AdminHome({ onEnterAccount }) {
+function AdminHome({ user, onEnterAccount }) {
   const [subTab, setSubTab] = useState("accounts");
   const [unreadCount, setUnreadCount] = useState(0);
 
   const refreshUnread = useCallback(async () => {
     const keys = await storeList("message:", true);
     const msgs = await Promise.all(keys.map((k) => storeGet(k, true)));
-    setUnreadCount(msgs.filter((m) => m && !m.readByAdmin).length);
+    setUnreadCount(msgs.filter((m) => m && m.fromRole !== "admin" && !m.read).length);
   }, []);
 
   useEffect(() => {
@@ -1962,7 +1962,7 @@ function AdminHome({ onEnterAccount }) {
       </div>
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
         {subTab === "accounts" && <AdminDashboard onEnterAccount={onEnterAccount} />}
-        {subTab === "messages" && <AdminMessages onViewed={refreshUnread} />}
+        {subTab === "messages" && <AdminMessages adminUser={user} onViewed={refreshUnread} />}
         {subTab === "testing" && <AdminTesting onEnterAccount={onEnterAccount} />}
       </div>
     </div>
@@ -2125,10 +2125,22 @@ function TestAccountGroup({ title, users, groupsByEmail, onEnterAccount, onDelet
   );
 }
 
-function AdminMessages({ onViewed }) {
+// Message shape: { id, subject, body, fromEmail, fromName, fromRole, toEmail,
+// toName, createdAt, read }. Every message — whether started by a user or by
+// admin, and whether it's a fresh message or a reply — is stored the same way,
+// keyed under the non-admin participant's email so their Contact Admin tab picks
+// up the whole thread regardless of who sent which message.
+function AdminMessages({ adminUser, onViewed }) {
   const [messages, setMessages] = useState(null);
-  const [replyDrafts, setReplyDrafts] = useState({});
+  const [expandedId, setExpandedId] = useState(null);
+  const [replyDrafts, setReplyDrafts] = useState({}); // id -> { subject, body }
   const [busyId, setBusyId] = useState(null);
+  const [composing, setComposing] = useState(false);
+  const [newTo, setNewTo] = useState("");
+  const [newSubject, setNewSubject] = useState("");
+  const [newBody, setNewBody] = useState("");
+  const [composeError, setComposeError] = useState("");
+  const [composeBusy, setComposeBusy] = useState(false);
 
   const load = useCallback(async () => {
     const keys = await storeList("message:", true);
@@ -2142,9 +2154,9 @@ function AdminMessages({ onViewed }) {
     ).filter(Boolean);
     msgs.sort((a, b) => b.createdAt - a.createdAt);
     setMessages(msgs);
-    const unread = msgs.filter((m) => !m.readByAdmin);
+    const unread = msgs.filter((m) => m.fromRole !== "admin" && !m.read);
     if (unread.length) {
-      await Promise.all(unread.map((m) => storeSet(m._key, { ...m, readByAdmin: true }, true)));
+      await Promise.all(unread.map((m) => storeSet(m._key, { ...m, read: true }, true)));
     }
     onViewed?.();
   }, []);
@@ -2153,53 +2165,184 @@ function AdminMessages({ onViewed }) {
     load();
   }, [load]);
 
+  const startReply = (m) => {
+    setExpandedId(m.id);
+    setReplyDrafts((prev) => ({ ...prev, [m.id]: { subject: m.subject, body: "" } }));
+  };
+  const cancelReply = (id) =>
+    setReplyDrafts((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+
   const sendReply = async (m) => {
-    const draft = (replyDrafts[m.id] || "").trim();
-    if (!draft) return;
+    const draft = replyDrafts[m.id];
+    if (!draft || !draft.subject.trim() || !draft.body.trim()) return;
     setBusyId(m.id);
-    await storeSet(m._key, { ...m, adminReply: draft, repliedAt: Date.now(), readByAdmin: true }, true);
+    const id = genId();
+    await storeSet(
+      `message:${safeKey(m.fromEmail)}:${id}`,
+      {
+        id,
+        subject: draft.subject.trim(),
+        body: draft.body.trim(),
+        fromEmail: ADMIN_EMAIL,
+        fromName: adminUser?.name || "Admin",
+        fromRole: "admin",
+        toEmail: m.fromEmail,
+        toName: m.fromName,
+        createdAt: Date.now(),
+        read: false,
+      },
+      true
+    );
     setBusyId(null);
-    setReplyDrafts((prev) => ({ ...prev, [m.id]: "" }));
+    cancelReply(m.id);
+    load();
+  };
+
+  const sendNew = async () => {
+    setComposeError("");
+    if (!newTo.trim() || !newSubject.trim() || !newBody.trim()) return setComposeError("Fill in the recipient, subject, and message.");
+    setComposeBusy(true);
+    const recipient = await storeGet(`user:${safeKey(newTo)}`, true);
+    if (!recipient) {
+      setComposeBusy(false);
+      return setComposeError("No account found with that email.");
+    }
+    const id = genId();
+    await storeSet(
+      `message:${safeKey(recipient.email)}:${id}`,
+      {
+        id,
+        subject: newSubject.trim(),
+        body: newBody.trim(),
+        fromEmail: ADMIN_EMAIL,
+        fromName: adminUser?.name || "Admin",
+        fromRole: "admin",
+        toEmail: recipient.email,
+        toName: recipient.name,
+        createdAt: Date.now(),
+        read: false,
+      },
+      true
+    );
+    setComposeBusy(false);
+    setComposing(false);
+    setNewTo("");
+    setNewSubject("");
+    setNewBody("");
     load();
   };
 
   return (
     <div>
-      <Header eyebrow="Admin" title="Messages" sub="Sent to admin by teachers and students. Replies show up in their Contact Admin tab." />
+      <Header eyebrow="Admin" title="Messages" sub="Every message between admin and a teacher or student, in one place." />
+
+      <div style={{ marginBottom: 16 }}>
+        {!composing ? (
+          <Btn onClick={() => setComposing(true)}>
+            <Plus size={14} /> New message
+          </Btn>
+        ) : (
+          <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: 14 }}>
+            <Field label="To (email)">
+              <input style={inputStyle} value={newTo} onChange={(e) => setNewTo(e.target.value)} placeholder="student@school.edu" />
+            </Field>
+            <Field label="Subject">
+              <input style={inputStyle} value={newSubject} onChange={(e) => setNewSubject(e.target.value)} placeholder="Subject" />
+            </Field>
+            <Field label="Message">
+              <textarea style={{ ...inputStyle, minHeight: 72, resize: "vertical" }} rows={3} value={newBody} onChange={(e) => setNewBody(e.target.value)} />
+            </Field>
+            {composeError && (
+              <div style={{ color: clay, fontSize: 12.5, marginBottom: 10, display: "flex", gap: 6 }}>
+                <AlertTriangle size={13} style={{ marginTop: 1, flexShrink: 0 }} /> {composeError}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn onClick={sendNew} disabled={composeBusy}>
+                {composeBusy ? "Sending…" : "Send"}
+              </Btn>
+              <Btn
+                tone="ghost"
+                onClick={() => {
+                  setComposing(false);
+                  setComposeError("");
+                }}
+                disabled={composeBusy}
+              >
+                Cancel
+              </Btn>
+            </div>
+          </div>
+        )}
+      </div>
+
       {messages === null ? (
         <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
       ) : messages.length === 0 ? (
         <p style={{ color: inkSoft, fontSize: 13 }}>No messages yet.</p>
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {messages.map((m) => (
-            <div key={m._key} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: 14 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
-                <span style={{ fontWeight: 700, fontSize: 13.5 }}>{m.fromName}</span>
-                <span style={{ fontSize: 11, color: inkSoft, fontFamily: mono }}>
-                  {m.fromEmail} · {m.fromRole}
-                </span>
+        <div style={{ display: "grid", gap: 8 }}>
+          {messages.map((m) => {
+            const expanded = expandedId === m.id;
+            const draft = replyDrafts[m.id];
+            return (
+              <div key={m._key} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: 14 }}>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setExpandedId(expanded ? null : m.id)}
+                  onKeyDown={(e) => e.key === "Enter" && setExpandedId(expanded ? null : m.id)}
+                  style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}
+                >
+                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>{m.subject}</span>
+                  <span style={{ fontSize: 11, color: inkSoft, fontFamily: mono, whiteSpace: "nowrap" }}>
+                    {m.fromName} · {m.fromEmail}
+                  </span>
+                </div>
+                {expanded && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${line}` }}>
+                    <p style={{ fontSize: 13.5, color: ink, margin: "0 0 10px", lineHeight: 1.5 }}>{m.body}</p>
+                    {m.fromRole !== "admin" && !draft && (
+                      <Btn tone="ghost" onClick={() => startReply(m)}>
+                        <MessageCircle size={13} /> Reply
+                      </Btn>
+                    )}
+                    {draft && (
+                      <div style={{ marginTop: 8 }}>
+                        <Field label="Subject">
+                          <input
+                            style={inputStyle}
+                            value={draft.subject}
+                            onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [m.id]: { ...prev[m.id], subject: e.target.value } }))}
+                          />
+                        </Field>
+                        <Field label="Reply">
+                          <textarea
+                            style={{ ...inputStyle, minHeight: 60, resize: "vertical" }}
+                            rows={2}
+                            value={draft.body}
+                            onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [m.id]: { ...prev[m.id], body: e.target.value } }))}
+                          />
+                        </Field>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <Btn onClick={() => sendReply(m)} disabled={busyId === m.id || !draft.subject.trim() || !draft.body.trim()}>
+                            {busyId === m.id ? "Sending…" : "Send reply"}
+                          </Btn>
+                          <Btn tone="ghost" onClick={() => cancelReply(m.id)} disabled={busyId === m.id}>
+                            Cancel
+                          </Btn>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              <p style={{ fontSize: 13.5, color: ink, margin: "0 0 10px", lineHeight: 1.5 }}>{m.body}</p>
-              {m.adminReply ? (
-                <div style={{ background: greenSoft, borderRadius: 7, padding: "8px 10px", fontSize: 12.5, color: green }}>
-                  <strong>Your reply:</strong> {m.adminReply}
-                </div>
-              ) : (
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    style={{ ...inputStyle, flex: 1 }}
-                    placeholder="Write a reply…"
-                    value={replyDrafts[m.id] || ""}
-                    onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [m.id]: e.target.value }))}
-                  />
-                  <Btn onClick={() => sendReply(m)} disabled={busyId === m.id || !(replyDrafts[m.id] || "").trim()}>
-                    {busyId === m.id ? "Sending…" : "Reply"}
-                  </Btn>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -2441,7 +2584,9 @@ function AdminDashboard({ onEnterAccount }) {
 // ---------------- CONTACT ADMIN ----------------
 function ContactAdmin({ user }) {
   const [messages, setMessages] = useState(null);
-  const [draft, setDraft] = useState("");
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [replyingTo, setReplyingTo] = useState(null); // the admin message being replied to, or null for a fresh message
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -2455,19 +2600,41 @@ function ContactAdmin({ user }) {
     load();
   }, [load]);
 
+  const startReply = (m) => {
+    setReplyingTo(m);
+    setSubject(m.subject);
+    setBody("");
+  };
+  const cancelReply = () => {
+    setReplyingTo(null);
+    setSubject("");
+    setBody("");
+  };
+
   const send = async () => {
-    const body = draft.trim();
-    if (!body) return;
+    if (!subject.trim() || !body.trim()) return;
     setBusy(true);
     const id = genId();
-    const key = `message:${safeKey(user.email)}:${id}`;
     await storeSet(
-      key,
-      { id, fromEmail: user.email, fromName: user.name, fromRole: user.role, body, createdAt: Date.now(), adminReply: null, repliedAt: null, readByAdmin: false },
+      `message:${safeKey(user.email)}:${id}`,
+      {
+        id,
+        subject: subject.trim(),
+        body: body.trim(),
+        fromEmail: user.email,
+        fromName: user.name,
+        fromRole: user.role,
+        toEmail: ADMIN_EMAIL,
+        toName: "Admin",
+        createdAt: Date.now(),
+        read: false,
+      },
       true
     );
     setBusy(false);
-    setDraft("");
+    setSubject("");
+    setBody("");
+    setReplyingTo(null);
     load();
   };
 
@@ -2475,18 +2642,23 @@ function ContactAdmin({ user }) {
     <div>
       <Header eyebrow="Support" title="Message admin" sub="Send a note straight to the site admin — replies show up here." />
       <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 10, padding: 16, marginBottom: 18 }}>
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="What's going on?"
-          rows={3}
-          style={{ ...inputStyle, minHeight: 72, resize: "vertical" }}
-        />
-        <div style={{ marginTop: 10 }}>
-          <Btn onClick={send} disabled={busy || !draft.trim()}>
-            {busy ? "Sending…" : "Send message"}
-          </Btn>
-        </div>
+        {replyingTo && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: greenSoft, borderRadius: 6, padding: "6px 10px", marginBottom: 10, fontSize: 12, color: green }}>
+            <span>Replying to "{replyingTo.subject}"</span>
+            <button onClick={cancelReply} style={{ background: "none", border: "none", color: green, cursor: "pointer", display: "flex", alignItems: "center", padding: 0 }}>
+              <X size={13} />
+            </button>
+          </div>
+        )}
+        <Field label="Subject">
+          <input style={inputStyle} value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="What's this about?" />
+        </Field>
+        <Field label="Message">
+          <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="What's going on?" rows={3} style={{ ...inputStyle, minHeight: 72, resize: "vertical" }} />
+        </Field>
+        <Btn onClick={send} disabled={busy || !subject.trim() || !body.trim()}>
+          {busy ? "Sending…" : "Send message"}
+        </Btn>
       </div>
       {messages === null ? (
         <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
@@ -2496,14 +2668,18 @@ function ContactAdmin({ user }) {
         <div style={{ display: "grid", gap: 10 }}>
           {messages.map((m) => (
             <div key={m.id} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: "10px 14px" }}>
+              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>{m.subject}</div>
               <p style={{ fontSize: 13, color: ink, margin: "0 0 8px", lineHeight: 1.5 }}>{m.body}</p>
-              {m.adminReply ? (
-                <div style={{ background: greenSoft, borderRadius: 6, padding: "7px 9px", fontSize: 12.5, color: green }}>
-                  <strong>Admin:</strong> {m.adminReply}
-                </div>
-              ) : (
-                <div style={{ fontSize: 11.5, color: inkSoft, fontStyle: "italic" }}>Waiting on a reply…</div>
-              )}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 11.5, color: inkSoft, fontStyle: "italic" }}>
+                  {m.fromRole === "admin" ? "From Admin" : "You"}
+                </span>
+                {m.fromRole === "admin" && (
+                  <Btn tone="ghost" onClick={() => startReply(m)}>
+                    <MessageCircle size={12} /> Reply
+                  </Btn>
+                )}
+              </div>
             </div>
           ))}
         </div>
