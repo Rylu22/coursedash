@@ -2162,11 +2162,12 @@ function AdminMessages({ adminUser, onViewed }) {
     // side sent which message, since they're all keyed under that person's email.
     const byOther = {};
     msgs.forEach((m) => {
-      const otherEmail = m.fromRole === "admin" ? m.toEmail : m.fromEmail;
-      if (!byOther[otherEmail]) byOther[otherEmail] = { otherEmail, otherName: m.fromRole === "admin" ? m.toName : m.fromName, otherRole: null, messages: [] };
+      const otherEmail = (m.fromRole === "admin" ? m.toEmail : m.fromEmail) || "unknown";
+      if (!byOther[otherEmail])
+        byOther[otherEmail] = { otherEmail, otherName: (m.fromRole === "admin" ? m.toName : m.fromName) || "Unknown", otherRole: null, messages: [] };
       byOther[otherEmail].messages.push(m);
       if (m.fromRole !== "admin") {
-        byOther[otherEmail].otherName = m.fromName; // keep this fresh from the user's own messages
+        byOther[otherEmail].otherName = m.fromName || "Unknown"; // keep this fresh from the user's own messages
         byOther[otherEmail].otherRole = m.fromRole;
       }
     });
@@ -2179,7 +2180,7 @@ function AdminMessages({ adminUser, onViewed }) {
       Object.values(byOther).map(async (c) => {
         c.messages.sort((a, b) => a.createdAt - b.createdAt);
         c.lastMessageAt = c.messages[c.messages.length - 1].createdAt;
-        c.subject = c.messages[c.messages.length - 1].subject;
+        c.subject = c.messages[c.messages.length - 1].subject || "(no subject)";
         c.unreadCount = c.messages.filter((m) => m.fromRole !== "admin" && !m.read).length;
         if (c.unreadCount === 0 && Date.now() - c.lastMessageAt > MESSAGE_INACTIVITY_DELETE_MS) {
           await Promise.all(c.messages.map((m) => storeDelete(m._key, true)));
@@ -2281,7 +2282,7 @@ function AdminMessages({ adminUser, onViewed }) {
   const q = search.trim().toLowerCase();
   const shown = (conversations || [])
     .filter((c) => c.otherEmail === expandedEmail || (subTab === "new" ? c.unreadCount > 0 : c.unreadCount === 0))
-    .filter((c) => !q || c.otherName.toLowerCase().includes(q) || c.otherEmail.toLowerCase().includes(q) || c.subject.toLowerCase().includes(q));
+    .filter((c) => !q || (c.otherName || "").toLowerCase().includes(q) || (c.otherEmail || "").toLowerCase().includes(q) || (c.subject || "").toLowerCase().includes(q));
 
   return (
     <div>
