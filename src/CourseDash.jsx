@@ -2295,7 +2295,12 @@ function AdminMessages({ adminUser, onViewed }) {
 
   const newConvos = (conversations || []).filter((c) => c.unreadCount > 0);
   const oldConvos = (conversations || []).filter((c) => c.unreadCount === 0);
-  const shown = subTab === "new" ? newConvos : oldConvos;
+  // Opening a conversation marks it read right away, which would otherwise yank it
+  // out of the New tab mid-read as soon as that happens. Keep whatever's currently
+  // expanded visible in whichever tab it was opened from until it's closed again.
+  const shown = (conversations || []).filter(
+    (c) => c.otherEmail === expandedEmail || (subTab === "new" ? c.unreadCount > 0 : c.unreadCount === 0)
+  );
 
   return (
     <div>
