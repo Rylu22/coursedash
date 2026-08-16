@@ -255,6 +255,9 @@ function explainPlacement({ student, courseId, courses, allStudents, priority, s
   return { course, rankedChoices, matchedRank, historyScore, demand };
 }
 
+// How long a teacher has to restore a deleted group before it's gone for good.
+const TEACHER_DELETE_UNDO_MS = 5 * 60 * 1000;
+
 const DEFAULT_LOGIC_SETTINGS = {
   useGrade: true,
   usePreference: true,
@@ -1886,8 +1889,11 @@ function PriorityBadge({ scores, courseName }) {
   );
 }
 
-// ---------------- ADMIN ----------------
-async function adminDeleteGroup(group) {
+// Fully, irreversibly removes a group and everything under it — submissions, its
+// slot in the owning teacher's group list, and its slot in a chain (deleting the
+// chain too if this was its last group). Shared by the admin's group delete and by
+// a teacher's soft-deleted group once its undo window expires.
+async function permanentlyDeleteGroup(group) {
   const subKeys = await storeList(`submission:${group.code}:`, true);
   await Promise.all(subKeys.map((k) => storeDelete(k, true)));
 
@@ -2266,7 +2272,7 @@ function AdminDashboard({ onEnterAccount }) {
     setBusy(true);
     for (const code of confirm.groupCodes) {
       const g = groups.find((gr) => gr.code === code);
-      if (g) await adminDeleteGroup(g);
+      if (g) await permanentlyDeleteGroup(g);
     }
     for (const email of confirm.userEmails) {
       await storeDelete(`user:${safeKey(email)}`, true);
@@ -2784,6 +2790,10 @@ function TeacherDashboard({ user, onOpenGroup }) {
   const [seriesNameForDrop, setSeriesNameForDrop] = useState("");
   const [dropError, setDropError] = useState("");
   const [dropBusy, setDropBusy] = useState(false);
+  const [recentlyDeleted, setRecentlyDeleted] = useState([]);
+  const [confirmDelete, setConfirmDelete] = useState(null); // the group pending a delete confirmation
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [now, setNow] = useState(Date.now());
 
   const load = useCallback(async () => {
     const groupCodes = (await storeGet(`teacher-groups:${safeKey(user.email)}`, true)) || [];
@@ -2796,8 +2806,30 @@ function TeacherDashboard({ user, onOpenGroup }) {
         return g ? { ...g, studentCount: subs.length } : null;
       })
     );
+
+    // Groups past their undo window get permanently cleaned up right here, the next
+    // time this list loads — there's no background job, so "gone for good" happens
+    // lazily, the next time anyone looks. Anything still inside the window shows up
+    // in "Recently deleted" instead of the normal group lists below.
+    const stillDeleted = [];
+    const active = [];
+    await Promise.all(
+      groupObjs.filter(Boolean).map(async (g) => {
+        if (g.deletedAt) {
+          if (Date.now() - g.deletedAt > TEACHER_DELETE_UNDO_MS) {
+            await permanentlyDeleteGroup(g);
+          } else {
+            stillDeleted.push(g);
+          }
+        } else {
+          active.push(g);
+        }
+      })
+    );
+    setRecentlyDeleted(stillDeleted.sort((a, b) => b.deletedAt - a.deletedAt));
+
     const byCode = {};
-    groupObjs.filter(Boolean).forEach((g) => (byCode[g.code] = g));
+    active.forEach((g) => (byCode[g.code] = g));
     setAllGroups(byCode);
 
     const chainObjs = await Promise.all(chainIds.map((id) => storeGet(`chain:${id}`, true)));
@@ -2813,6 +2845,38 @@ function TeacherDashboard({ user, onOpenGroup }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // A slow poll (so an expired group actually disappears even if the teacher just
+  // leaves this tab open) plus a fast local tick purely to keep the "time left"
+  // countdown moving between polls.
+  useEffect(() => {
+    const poll = setInterval(load, 20000);
+    return () => clearInterval(poll);
+  }, [load]);
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const deleteGroup = async (group) => {
+    setDeleteBusy(true);
+    const fresh = normalizeGroup(await storeGet(`group:${group.code}`, true));
+    if (fresh) await storeSet(`group:${group.code}`, { ...fresh, deletedAt: Date.now() }, true);
+    setConfirmDelete(null);
+    setDeleteBusy(false);
+    await load();
+  };
+
+  const restoreGroup = async (group) => {
+    setDeleteBusy(true);
+    const fresh = normalizeGroup(await storeGet(`group:${group.code}`, true));
+    if (fresh) {
+      const { deletedAt, ...rest } = fresh;
+      await storeSet(`group:${group.code}`, rest, true);
+    }
+    setDeleteBusy(false);
+    await load();
+  };
 
   const addGroupCode = async (code) => {
     const codes = (await storeGet(`teacher-groups:${safeKey(user.email)}`, true)) || [];
@@ -3084,6 +3148,16 @@ function TeacherDashboard({ user, onOpenGroup }) {
                       >
                         <Copy size={13} />
                       </IconBtn>
+                      <IconBtn
+                        tone="clay"
+                        title="Delete group"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDelete(g);
+                        }}
+                      >
+                        <Trash2 size={13} />
+                      </IconBtn>
                       <div style={{ fontFamily: mono, fontWeight: 700, fontSize: 13, letterSpacing: 2, background: goldSoft, color: gold, padding: "5px 10px", borderRadius: 6 }}>
                         {g.code}
                       </div>
@@ -3167,6 +3241,16 @@ function TeacherDashboard({ user, onOpenGroup }) {
                       >
                         <Copy size={13} />
                       </IconBtn>
+                      <IconBtn
+                        tone="clay"
+                        title="Delete group"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDelete(g);
+                        }}
+                      >
+                        <Trash2 size={13} />
+                      </IconBtn>
                       <div style={{ fontFamily: mono, fontWeight: 700, fontSize: 15, letterSpacing: 2, background: goldSoft, color: gold, padding: "6px 12px", borderRadius: 6 }}>
                         {g.code}
                       </div>
@@ -3178,6 +3262,65 @@ function TeacherDashboard({ user, onOpenGroup }) {
           )}
 
           {chains.length === 0 && standalone.length === 0 && <p style={{ color: inkSoft, fontSize: 13 }}>No groups yet — create your first one below.</p>}
+        </div>
+      )}
+
+      {recentlyDeleted.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: clay, textTransform: "uppercase", marginBottom: 6 }}>Recently deleted</div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {recentlyDeleted.map((g) => {
+              const remainingMs = Math.max(0, TEACHER_DELETE_UNDO_MS - (now - g.deletedAt));
+              const mins = Math.floor(remainingMs / 60000);
+              const secs = Math.floor((remainingMs % 60000) / 1000);
+              return (
+                <div
+                  key={g.code}
+                  style={{
+                    background: claySoft,
+                    border: `1px solid ${clay}55`,
+                    borderRadius: 9,
+                    padding: "12px 16px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontFamily: serif, fontSize: 16, fontWeight: 700 }}>{g.name}</div>
+                    <div style={{ fontSize: 12, color: clay, marginTop: 2 }}>
+                      {remainingMs > 0 ? `Gone for good in ${mins}m ${secs.toString().padStart(2, "0")}s` : "Deleting…"}
+                    </div>
+                  </div>
+                  <Btn tone="ghost" onClick={() => restoreGroup(g)} disabled={deleteBusy}>
+                    <RefreshCw size={13} /> Restore
+                  </Btn>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {confirmDelete && (
+        <div
+          onClick={() => !deleteBusy && setConfirmDelete(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 360, maxWidth: "100%" }}>
+            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 8px" }}>Delete "{confirmDelete.name}"?</h3>
+            <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 14 }}>
+              It'll move to Recently Deleted, where you can restore it for the next 5 minutes. After that, it's deleted for good — including its courses, responses, and results.
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn tone="clay" onClick={() => deleteGroup(confirmDelete)} disabled={deleteBusy}>
+                {deleteBusy ? "Deleting…" : "Delete"}
+              </Btn>
+              <Btn tone="ghost" onClick={() => setConfirmDelete(null)} disabled={deleteBusy}>
+                Cancel
+              </Btn>
+            </div>
+          </div>
         </div>
       )}
 
