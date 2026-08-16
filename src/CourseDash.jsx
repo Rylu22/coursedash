@@ -1953,7 +1953,26 @@ function AdminHome({ user, onEnterAccount }) {
             <span style={{ position: "relative" }}>
               Messages
               {unreadCount > 0 && (
-                <span style={{ position: "absolute", top: -3, right: -9, width: 7, height: 7, borderRadius: "50%", background: clay }} />
+                <span
+                  style={{
+                    position: "absolute",
+                    top: -9,
+                    right: -16,
+                    minWidth: 15,
+                    height: 15,
+                    padding: "0 4px",
+                    borderRadius: 8,
+                    background: clay,
+                    color: "#fff",
+                    fontSize: 9.5,
+                    fontWeight: 700,
+                    lineHeight: "15px",
+                    textAlign: "center",
+                    fontFamily: mono,
+                  }}
+                >
+                  {unreadCount}
+                </span>
               )}
             </span>
           }
@@ -2130,11 +2149,17 @@ function TestAccountGroup({ title, users, groupsByEmail, onEnterAccount, onDelet
 // admin, and whether it's a fresh message or a reply — is stored the same way,
 // keyed under the non-admin participant's email so their Contact Admin tab picks
 // up the whole thread regardless of who sent which message.
+// A conversation with no new messages sitting untouched this long gets permanently
+// deleted the next time the admin's Messages list loads.
+const MESSAGE_INACTIVITY_DELETE_MS = 30 * 24 * 60 * 60 * 1000;
+
 function AdminMessages({ adminUser, onViewed }) {
-  const [messages, setMessages] = useState(null);
-  const [expandedId, setExpandedId] = useState(null);
-  const [replyDrafts, setReplyDrafts] = useState({}); // id -> { subject, body }
-  const [busyId, setBusyId] = useState(null);
+  const [conversations, setConversations] = useState(null); // [{ otherEmail, otherName, otherRole, messages, lastMessageAt, subject, unreadCount }]
+  const [subTab, setSubTab] = useState("new"); // new | old
+  const [expandedEmail, setExpandedEmail] = useState(null);
+  const [replySubject, setReplySubject] = useState("");
+  const [replyBody, setReplyBody] = useState("");
+  const [replyBusy, setReplyBusy] = useState(false);
   const [composing, setComposing] = useState(false);
   const [newTo, setNewTo] = useState("");
   const [newSubject, setNewSubject] = useState("");
@@ -2152,12 +2177,39 @@ function AdminMessages({ adminUser, onViewed }) {
         })
       )
     ).filter(Boolean);
-    msgs.sort((a, b) => b.createdAt - a.createdAt);
-    setMessages(msgs);
-    const unread = msgs.filter((m) => m.fromRole !== "admin" && !m.read);
-    if (unread.length) {
-      await Promise.all(unread.map((m) => storeSet(m._key, { ...m, read: true }, true)));
-    }
+
+    // Group into one conversation per non-admin participant — regardless of which
+    // side sent which message, since they're all keyed under that person's email.
+    const byOther = {};
+    msgs.forEach((m) => {
+      const otherEmail = m.fromRole === "admin" ? m.toEmail : m.fromEmail;
+      if (!byOther[otherEmail]) byOther[otherEmail] = { otherEmail, otherName: m.fromRole === "admin" ? m.toName : m.fromName, otherRole: null, messages: [] };
+      byOther[otherEmail].messages.push(m);
+      if (m.fromRole !== "admin") {
+        byOther[otherEmail].otherName = m.fromName; // keep this fresh from the user's own messages
+        byOther[otherEmail].otherRole = m.fromRole;
+      }
+    });
+
+    // A conversation that's fully read and hasn't seen a new message in over a
+    // month gets permanently deleted right here — there's no background job, so
+    // "gone" happens lazily, the next time anyone looks at this list.
+    const kept = [];
+    await Promise.all(
+      Object.values(byOther).map(async (c) => {
+        c.messages.sort((a, b) => a.createdAt - b.createdAt);
+        c.lastMessageAt = c.messages[c.messages.length - 1].createdAt;
+        c.subject = c.messages[c.messages.length - 1].subject;
+        c.unreadCount = c.messages.filter((m) => m.fromRole !== "admin" && !m.read).length;
+        if (c.unreadCount === 0 && Date.now() - c.lastMessageAt > MESSAGE_INACTIVITY_DELETE_MS) {
+          await Promise.all(c.messages.map((m) => storeDelete(m._key, true)));
+        } else {
+          kept.push(c);
+        }
+      })
+    );
+    kept.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+    setConversations(kept);
     onViewed?.();
   }, []);
 
@@ -2165,40 +2217,45 @@ function AdminMessages({ adminUser, onViewed }) {
     load();
   }, [load]);
 
-  const startReply = (m) => {
-    setExpandedId(m.id);
-    setReplyDrafts((prev) => ({ ...prev, [m.id]: { subject: m.subject, body: "" } }));
+  // Opening a conversation is what moves it from New to Old — every unread message
+  // in it gets marked read at once, not just the one that was clicked.
+  const openConversation = async (c) => {
+    if (expandedEmail === c.otherEmail) {
+      setExpandedEmail(null);
+      return;
+    }
+    setExpandedEmail(c.otherEmail);
+    setReplySubject(c.subject);
+    setReplyBody("");
+    const unread = c.messages.filter((m) => m.fromRole !== "admin" && !m.read);
+    if (unread.length) {
+      await Promise.all(unread.map((m) => storeSet(m._key, { ...m, read: true }, true)));
+      load();
+    }
   };
-  const cancelReply = (id) =>
-    setReplyDrafts((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
 
-  const sendReply = async (m) => {
-    const draft = replyDrafts[m.id];
-    if (!draft || !draft.subject.trim() || !draft.body.trim()) return;
-    setBusyId(m.id);
+  const sendReply = async (c) => {
+    if (!replySubject.trim() || !replyBody.trim()) return;
+    setReplyBusy(true);
     const id = genId();
     await storeSet(
-      `message:${safeKey(m.fromEmail)}:${id}`,
+      `message:${safeKey(c.otherEmail)}:${id}`,
       {
         id,
-        subject: draft.subject.trim(),
-        body: draft.body.trim(),
+        subject: replySubject.trim(),
+        body: replyBody.trim(),
         fromEmail: ADMIN_EMAIL,
         fromName: adminUser?.name || "Admin",
         fromRole: "admin",
-        toEmail: m.fromEmail,
-        toName: m.fromName,
+        toEmail: c.otherEmail,
+        toName: c.otherName,
         createdAt: Date.now(),
         read: false,
       },
       true
     );
-    setBusyId(null);
-    cancelReply(m.id);
+    setReplyBusy(false);
+    setReplyBody("");
     load();
   };
 
@@ -2235,6 +2292,10 @@ function AdminMessages({ adminUser, onViewed }) {
     setNewBody("");
     load();
   };
+
+  const newConvos = (conversations || []).filter((c) => c.unreadCount > 0);
+  const oldConvos = (conversations || []).filter((c) => c.unreadCount === 0);
+  const shown = subTab === "new" ? newConvos : oldConvos;
 
   return (
     <div>
@@ -2280,64 +2341,73 @@ function AdminMessages({ adminUser, onViewed }) {
         )}
       </div>
 
-      {messages === null ? (
+      <div style={{ display: "flex", gap: 4, borderBottom: `1px solid ${line}`, marginBottom: 14 }}>
+        <FolderTab active={subTab === "new"} onClick={() => setSubTab("new")} icon={Mail} label={`New${newConvos.length ? ` (${newConvos.length})` : ""}`} />
+        <FolderTab active={subTab === "old"} onClick={() => setSubTab("old")} icon={ClipboardList} label="Old" />
+      </div>
+
+      {conversations === null ? (
         <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
-      ) : messages.length === 0 ? (
-        <p style={{ color: inkSoft, fontSize: 13 }}>No messages yet.</p>
+      ) : shown.length === 0 ? (
+        <p style={{ color: inkSoft, fontSize: 13 }}>{subTab === "new" ? "No new messages." : "Nothing here."}</p>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          {messages.map((m) => {
-            const expanded = expandedId === m.id;
-            const draft = replyDrafts[m.id];
+          {shown.map((c) => {
+            const expanded = expandedEmail === c.otherEmail;
             return (
-              <div key={m._key} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: 14 }}>
+              <div key={c.otherEmail} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: 14 }}>
                 <div
                   role="button"
                   tabIndex={0}
-                  onClick={() => setExpandedId(expanded ? null : m.id)}
-                  onKeyDown={(e) => e.key === "Enter" && setExpandedId(expanded ? null : m.id)}
+                  onClick={() => openConversation(c)}
+                  onKeyDown={(e) => e.key === "Enter" && openConversation(c)}
                   style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}
                 >
-                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>{m.subject}</span>
+                  <span style={{ fontWeight: 700, fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>
+                    {c.subject}
+                    {c.unreadCount > 0 && (
+                      <span
+                        style={{
+                          fontFamily: mono,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          background: clay,
+                          color: "#fff",
+                          borderRadius: 8,
+                          padding: "1px 6px",
+                        }}
+                      >
+                        {c.unreadCount}
+                      </span>
+                    )}
+                  </span>
                   <span style={{ fontSize: 11, color: inkSoft, fontFamily: mono, whiteSpace: "nowrap" }}>
-                    {m.fromName} · {m.fromEmail}
+                    {c.otherName} · {c.otherEmail}
                   </span>
                 </div>
                 {expanded && (
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${line}` }}>
-                    <p style={{ fontSize: 13.5, color: ink, margin: "0 0 10px", lineHeight: 1.5 }}>{m.body}</p>
-                    {m.fromRole !== "admin" && !draft && (
-                      <Btn tone="ghost" onClick={() => startReply(m)}>
-                        <MessageCircle size={13} /> Reply
-                      </Btn>
-                    )}
-                    {draft && (
-                      <div style={{ marginTop: 8 }}>
-                        <Field label="Subject">
-                          <input
-                            style={inputStyle}
-                            value={draft.subject}
-                            onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [m.id]: { ...prev[m.id], subject: e.target.value } }))}
-                          />
-                        </Field>
-                        <Field label="Reply">
-                          <textarea
-                            style={{ ...inputStyle, minHeight: 60, resize: "vertical" }}
-                            rows={2}
-                            value={draft.body}
-                            onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [m.id]: { ...prev[m.id], body: e.target.value } }))}
-                          />
-                        </Field>
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <Btn onClick={() => sendReply(m)} disabled={busyId === m.id || !draft.subject.trim() || !draft.body.trim()}>
-                            {busyId === m.id ? "Sending…" : "Send reply"}
-                          </Btn>
-                          <Btn tone="ghost" onClick={() => cancelReply(m.id)} disabled={busyId === m.id}>
-                            Cancel
-                          </Btn>
+                    <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
+                      {c.messages.map((m) => (
+                        <div key={m.id} style={{ background: m.fromRole === "admin" ? greenSoft : "#F6F9FC", borderRadius: 7, padding: "8px 10px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: inkSoft, marginBottom: 3 }}>
+                            <span style={{ fontWeight: 700, color: m.fromRole === "admin" ? green : ink }}>{m.fromRole === "admin" ? "You" : m.fromName}</span>
+                            <span>{new Date(m.createdAt).toLocaleString()}</span>
+                          </div>
+                          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 2 }}>{m.subject}</div>
+                          <p style={{ fontSize: 13, color: ink, margin: 0, lineHeight: 1.5 }}>{m.body}</p>
                         </div>
-                      </div>
-                    )}
+                      ))}
+                    </div>
+                    <Field label="Subject">
+                      <input style={inputStyle} value={replySubject} onChange={(e) => setReplySubject(e.target.value)} />
+                    </Field>
+                    <Field label="Reply">
+                      <textarea style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} rows={2} value={replyBody} onChange={(e) => setReplyBody(e.target.value)} />
+                    </Field>
+                    <Btn onClick={() => sendReply(c)} disabled={replyBusy || !replySubject.trim() || !replyBody.trim()}>
+                      {replyBusy ? "Sending…" : "Send reply"}
+                    </Btn>
                   </div>
                 )}
               </div>
