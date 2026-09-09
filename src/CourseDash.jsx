@@ -1127,6 +1127,93 @@ function Header({ eyebrow, title, sub }) {
   );
 }
 
+// Shown only while the admin is viewing a test account. Lists every other test
+// account (teachers and students) so the admin can jump straight from one tester
+// to another without stepping back through the admin dashboard each time.
+function TestAccountSidebar({ currentUser, onSwitch }) {
+  const [testUsers, setTestUsers] = useState(null);
+
+  const load = useCallback(async () => {
+    const keys = await storeList("user:", true);
+    const recs = (await Promise.all(keys.map((k) => storeGet(k, true)))).filter(Boolean);
+    setTestUsers(recs.filter((u) => u.isTest));
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const teachers = (testUsers || []).filter((u) => u.role === "teacher");
+  const students = (testUsers || []).filter((u) => u.role === "student");
+
+  const renderGroup = (title, users) => (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 10.5, fontFamily: mono, letterSpacing: 1, textTransform: "uppercase", color: inkSoft, marginBottom: 6 }}>{title}</div>
+      {users.length === 0 ? (
+        <p style={{ color: inkSoft, fontSize: 12, margin: 0 }}>None yet.</p>
+      ) : (
+        <div style={{ display: "grid", gap: 5 }}>
+          {users.map((u) => {
+            const active = u.email === currentUser?.email;
+            return (
+              <button
+                key={u.email}
+                onClick={() => !active && onSwitch(u)}
+                disabled={active}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  textAlign: "left",
+                  fontFamily: sans,
+                  fontSize: 12.5,
+                  padding: "6px 8px",
+                  borderRadius: 6,
+                  border: active ? `1px solid ${gold}55` : `1px solid transparent`,
+                  background: active ? goldSoft : "transparent",
+                  color: active ? gold : ink,
+                  fontWeight: active ? 700 : 500,
+                  cursor: active ? "default" : "pointer",
+                }}
+              >
+                {active ? <ShieldCheck size={12} /> : <ArrowLeftRight size={12} />}
+                {u.name}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div
+      style={{
+        width: 190,
+        flexShrink: 0,
+        position: "sticky",
+        top: 20,
+        background: "#fff",
+        border: `1px solid ${line}`,
+        borderRadius: 10,
+        padding: "12px 10px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 700, color: inkSoft, marginBottom: 10 }}>
+        <Users size={13} /> TEST ACCOUNTS
+      </div>
+      {testUsers === null ? (
+        <p style={{ color: inkSoft, fontSize: 12 }}>Loading…</p>
+      ) : (
+        <div style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto", paddingRight: 2 }}>
+          {renderGroup("Teachers", teachers)}
+          {renderGroup("Students", students)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // =========================================================
 export default function App() {
   const [view, setView] = useState("home"); // home | about | login | signup | admin-dashboard | teacher-dashboard | teacher-group | student-home | student-survey | student-done
@@ -1211,6 +1298,14 @@ export default function App() {
     setActiveCode(null);
     setView("admin-dashboard");
   };
+  // Jump directly from one test account to another without returning to the
+  // admin dashboard in between — adminUser (the real admin) stays put.
+  const switchTestAccount = (account) => {
+    setActiveCode(null);
+    setUser(account);
+    setView(account.role === "teacher" ? "teacher-home" : "student-home");
+  };
+  const showTestSidebar = !!(adminUser && user?.isTest);
 
   return (
     <div
@@ -1225,7 +1320,9 @@ export default function App() {
       }}
     >
       {(view === "home" || view === "about" || view === "teacher-home" || view === "student-home") && <LeaderLines />}
-      <div style={{ maxWidth: 1180, margin: "0 auto" }}>
+      <div style={{ maxWidth: showTestSidebar ? 1400 : 1180, margin: "0 auto", display: showTestSidebar ? "flex" : "block", alignItems: "flex-start", gap: 20 }}>
+        {showTestSidebar && <TestAccountSidebar currentUser={user} onSwitch={switchTestAccount} />}
+        <div style={{ flex: 1, minWidth: 0 }}>
         {checkingSession ? (
           <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", marginTop: 60 }}>Loading…</p>
         ) : (
@@ -1316,6 +1413,7 @@ export default function App() {
         )}
           </>
         )}
+        </div>
       </div>
     </div>
   );
