@@ -1241,7 +1241,7 @@ function TestAccountSidebar({ currentUser, onSwitch }) {
 
 // =========================================================
 export default function App() {
-  const [view, setView] = useState("home"); // home | about | login | signup | admin-dashboard | admin-quickfill | teacher-dashboard | teacher-group | student-home | student-survey | student-done
+  const [view, setView] = useState("home"); // home | about | login | signup | admin-dashboard | admin-quickfill | teacher-dashboard | teacher-group | teacher-grid | student-home | student-survey | student-done
   const [user, setUser] = useState(null);
   const [adminUser, setAdminUser] = useState(null); // holds the real admin's record while viewing another account
   const [activeCode, setActiveCode] = useState(null);
@@ -1402,6 +1402,10 @@ export default function App() {
                 setActiveCode(code);
                 setView("teacher-group");
               }}
+              onOpenGrid={(code) => {
+                setActiveCode(code);
+                setView("teacher-grid");
+              }}
               showTutorial={!adminUser && !user.tutorialSeen}
               onTutorialDone={markTutorialSeen}
             />
@@ -1412,6 +1416,13 @@ export default function App() {
           <>
             <TopBar user={user} onLogout={logout} onBack={() => setView("teacher-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <GroupEditor code={activeCode} />
+          </>
+        )}
+
+        {view === "teacher-grid" && user && activeCode && (
+          <>
+            <TopBar user={user} onLogout={logout} onBack={() => setView("teacher-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TeacherResponsesGrid code={activeCode} />
           </>
         )}
 
@@ -2841,6 +2852,128 @@ function QuickFillGrid({ code }) {
   );
 }
 
+// ---------------- TEACHER RESPONSES GRID (read-only) ----------------
+// Same visual layout as the admin's quick-fill grid — students down the side,
+// courses and extra questions across the top — but for a teacher looking at
+// their own group's real responses. Nothing here is editable: no drag-and-drop,
+// no inputs, no add/remove, no submit. Purely a read-only snapshot.
+function TeacherResponsesGrid({ code }) {
+  const [group, setGroup] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const g = normalizeGroup(await storeGet(`group:${code}`, true));
+    setGroup(g);
+    const subKeys = await storeList(`submission:${code}:`, true);
+    const subs = (await Promise.all(subKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    const loadedRows = subs
+      .map((s) => ({
+        studentId: s.id,
+        name: s.name,
+        grade: s.grade,
+        assignments: Object.fromEntries((s.prefs || []).filter(Boolean).map((courseId, i) => [courseId, i + 1])),
+        extraAnswers: s.extraAnswers || {},
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    setRows(loadedRows);
+    setLoading(false);
+  }, [code]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const courses = group?.courses || [];
+  const extraQuestions = group?.extraQuestions || [];
+  const rankColorMap = { 1: gold, 2: green, 3: clay };
+  const rankSoftMap = { 1: goldSoft, 2: greenSoft, 3: claySoft };
+
+  if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
+
+  return (
+    <div>
+      <Header eyebrow={group.name} title="Responses grid" sub="A read-only view of every response — students down the side, courses and questions across the top." />
+
+      {courses.length < 2 ? (
+        <p style={{ fontSize: 13, color: inkSoft }}>This group doesn't have enough courses set up yet.</p>
+      ) : rows.length === 0 ? (
+        <p style={{ fontSize: 13, color: inkSoft }}>No responses yet.</p>
+      ) : (
+        <div style={{ overflowX: "auto", background: "#fff", border: `1px solid ${line}`, borderRadius: 10 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 380 + courses.length * 110 + extraQuestions.length * 160 }}>
+            <thead>
+              <tr>
+                <th style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 200 }}>
+                  Student
+                </th>
+                <th style={{ borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 70 }}>Grade</th>
+                {courses.map((c) => (
+                  <th
+                    key={c.id}
+                    style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: "10px 12px", fontFamily: serif, fontSize: 14.5, minWidth: 110 }}
+                  >
+                    {c.name || "(unnamed)"}
+                  </th>
+                ))}
+                {extraQuestions.map((q) => (
+                  <th
+                    key={q.id}
+                    style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: "10px 12px", fontFamily: sans, fontSize: 12.5, fontWeight: 700, minWidth: 160, textAlign: "left" }}
+                  >
+                    {q.text || "(untitled question)"}
+                    {q.required && <span style={{ color: clay }}> *</span>}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.studentId}>
+                  <td style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "8px 12px", fontSize: 13, fontWeight: 600 }}>
+                    {r.name}
+                  </td>
+                  <td style={{ borderBottom: `1px solid ${line}`, padding: "8px 12px", fontFamily: mono, fontSize: 13, color: inkSoft }}>{r.grade}</td>
+                  {courses.map((c) => {
+                    const rank = r.assignments[c.id];
+                    return (
+                      <td key={c.id} style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: 8, textAlign: "center" }}>
+                        {rank && (
+                          <span
+                            style={{
+                              display: "inline-block",
+                              minWidth: 64,
+                              padding: "5px 0",
+                              borderRadius: 6,
+                              background: rankSoftMap[rank],
+                              color: rankColorMap[rank],
+                              fontWeight: 700,
+                              fontSize: 12,
+                              fontFamily: mono,
+                            }}
+                          >
+                            Choice {rank}
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                  {extraQuestions.map((q) => (
+                    <td key={q.id} style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: "8px 10px", fontSize: 12.5 }}>
+                      {r.extraAnswers?.[q.id] || <span style={{ color: inkSoft }}>—</span>}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Message shape: { id, subject, body, fromEmail, fromName, fromRole, toEmail,
 // toName, createdAt, read }. Every message — whether started by a user or by
 // admin, and whether it's a fresh message or a reply — is stored the same way,
@@ -3525,7 +3658,7 @@ function TabBadge({ count }) {
   );
 }
 
-function TeacherHome({ user, onOpenGroup, showTutorial, onTutorialDone }) {
+function TeacherHome({ user, onOpenGroup, onOpenGrid, showTutorial, onTutorialDone }) {
   const [subTab, setSubTab] = useState("groups");
   const [pendingCount, setPendingCount] = useState(0);
   const [unreadMessages, setUnreadMessages] = useState(0);
@@ -3574,7 +3707,7 @@ function TeacherHome({ user, onOpenGroup, showTutorial, onTutorialDone }) {
         />
       </div>
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
-        {subTab === "groups" && <TeacherDashboard user={user} onOpenGroup={onOpenGroup} />}
+        {subTab === "groups" && <TeacherDashboard user={user} onOpenGroup={onOpenGroup} onOpenGrid={onOpenGrid} />}
         {subTab === "mailbox" && <Mailbox user={user} onResolved={refreshPending} />}
         {subTab === "contact" && <ContactAdmin user={user} onViewed={refreshUnreadMessages} />}
       </div>
@@ -3788,7 +3921,7 @@ function Mailbox({ user, onResolved }) {
   );
 }
 
-function TeacherDashboard({ user, onOpenGroup }) {
+function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
   const [chains, setChains] = useState(null); // [{...chain, groups: [group,...]}]
   const [standalone, setStandalone] = useState([]);
   const [creating, setCreating] = useState(false);
@@ -4158,6 +4291,15 @@ function TeacherDashboard({ user, onOpenGroup }) {
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <IconBtn
+                        title="View responses grid (read-only)"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenGrid?.(g.code);
+                        }}
+                      >
+                        <LayoutGrid size={13} />
+                      </IconBtn>
+                      <IconBtn
                         title="Duplicate group"
                         onClick={(e) => {
                           e.stopPropagation();
@@ -4252,6 +4394,15 @@ function TeacherDashboard({ user, onOpenGroup }) {
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <IconBtn
+                        title="View responses grid (read-only)"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenGrid?.(g.code);
+                        }}
+                      >
+                        <LayoutGrid size={13} />
+                      </IconBtn>
                       <IconBtn
                         title="Duplicate group"
                         onClick={(e) => {
