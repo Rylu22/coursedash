@@ -5118,7 +5118,7 @@ function ActiveGroupsList({ user, onEditGroup, onViewed }) {
                               {row.courseName}
                               {row.count > 0 && <span style={{ color: inkSoft }}> ({row.count})</span>}
                             </span>
-                            <span style={{ fontWeight: 700, color: ink }}>{row.percent === null ? "—" : `${Math.round(row.percent)}%`}</span>
+                            <span style={{ fontWeight: 700, color: ink }}>{row.percent === null ? "—" : `${row.percent.toFixed(1)}%`}</span>
                           </div>
                         ))}
                       </div>
