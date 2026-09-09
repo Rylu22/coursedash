@@ -4864,10 +4864,53 @@ function StudentHome({ user, onJoined, showTutorial, onTutorialDone }) {
   );
 }
 
+// For every other course in the group, estimates how likely a student currently
+// placed there would be to switch into `targetCourseId` — based on how each of
+// them ranked their current course and the target course on their own submission
+// (not the possibly teacher-edited `choiceRank` on the result, so a manual
+// placement outside their ranked choices correctly falls into the "not a choice"
+// bucket below). Ranks that can't occur together (e.g. current = choice 1) fall
+// back to 0% since there's no rule for them.
+function switchInProbability(prefs, currentCourseId, targetCourseId) {
+  const rankOf = (courseId) => {
+    const idx = (prefs || []).indexOf(courseId);
+    return idx === -1 ? null : idx + 1;
+  };
+  const rankCurrent = rankOf(currentCourseId);
+  const rankTarget = rankOf(targetCourseId);
+  if (rankCurrent === 1) return 0;
+  if (rankCurrent === 2) return rankTarget === 1 ? 10 : rankTarget === 3 ? 1 : 0;
+  if (rankCurrent === 3) return rankTarget === 1 ? 10 : rankTarget === 2 ? 5 : 0;
+  // Current course wasn't one of their ranked choices at all (backfilled).
+  return rankTarget === 1 ? 50 : rankTarget === 2 ? 5 : rankTarget === 3 ? 1 : 0;
+}
+
+// Averages switchInProbability across everyone currently placed in each other
+// course, giving one "chance someone switches here" percentage per club.
+async function computeSwitchLikelihood(g, targetCourseId) {
+  const keys = await storeList(`submission:${g.code}:`, true);
+  const subs = (await Promise.all(keys.map((k) => storeGet(k, true)))).filter(Boolean);
+  const subsById = {};
+  subs.forEach((s) => {
+    subsById[s.id] = s;
+  });
+  const assignments = g.results?.assignments || {};
+  return (g.courses || [])
+    .filter((c) => c.id !== targetCourseId)
+    .map((c) => {
+      const students = assignments[c.id] || [];
+      const probs = students.map((s) => switchInProbability(subsById[s.id]?.prefs, c.id, targetCourseId));
+      const percent = probs.length ? probs.reduce((a, b) => a + b, 0) / probs.length : null;
+      return { courseId: c.id, courseName: c.name, count: students.length, percent };
+    });
+}
+
 function ActiveGroupsList({ user, onEditGroup, onViewed }) {
   const [entries, setEntries] = useState(null);
   const [openRequestFor, setOpenRequestFor] = useState(null); // group code currently showing the request form
   const [requestTarget, setRequestTarget] = useState("");
+  const [switchStats, setSwitchStats] = useState({}); // group code -> per-club switch-likelihood rows
+  const [statsLoading, setStatsLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmWithdraw, setConfirmWithdraw] = useState(null); // group code pending withdraw confirmation
 
@@ -5045,14 +5088,42 @@ function ActiveGroupsList({ user, onEditGroup, onViewed }) {
 
                 {eligible && !g._pendingRequest && openRequestFor !== g.code && (
                   <div style={{ marginTop: 8 }}>
-                    <Btn tone="ghost" onClick={() => setOpenRequestFor(g.code)}>
+                    <Btn
+                      tone="ghost"
+                      onClick={async () => {
+                        setOpenRequestFor(g.code);
+                        setStatsLoading(true);
+                        const stats = await computeSwitchLikelihood(g, result.courseId);
+                        setSwitchStats((prev) => ({ ...prev, [g.code]: stats }));
+                        setStatsLoading(false);
+                      }}
+                    >
                       <ArrowLeftRight size={13} /> Request switch
                     </Btn>
                   </div>
                 )}
 
                 {eligible && openRequestFor === g.code && (
-                  <div style={{ marginTop: 10, borderTop: `1px solid ${line}`, paddingTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ marginTop: 10, borderTop: `1px solid ${line}`, paddingTop: 10 }}>
+                    <div style={{ fontSize: 11, fontFamily: mono, letterSpacing: 0.5, textTransform: "uppercase", color: inkSoft, marginBottom: 8 }}>
+                      Chance someone switches into {result.courseName}
+                    </div>
+                    {statsLoading && !switchStats[g.code] ? (
+                      <p style={{ color: inkSoft, fontSize: 12, margin: "0 0 10px" }}>Loading…</p>
+                    ) : (
+                      <div style={{ display: "grid", gap: 5, marginBottom: 10 }}>
+                        {(switchStats[g.code] || []).map((row) => (
+                          <div key={row.courseId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5 }}>
+                            <span>
+                              {row.courseName}
+                              {row.count > 0 && <span style={{ color: inkSoft }}> ({row.count})</span>}
+                            </span>
+                            <span style={{ fontWeight: 700, color: ink }}>{row.percent === null ? "—" : `${Math.round(row.percent)}%`}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <select
                       style={{ ...inputStyle, width: "auto", flex: 1, minWidth: 140 }}
                       value={requestTarget}
@@ -5075,11 +5146,17 @@ function ActiveGroupsList({ user, onEditGroup, onViewed }) {
                       onClick={() => {
                         setOpenRequestFor(null);
                         setRequestTarget("");
+                        setSwitchStats((prev) => {
+                          const next = { ...prev };
+                          delete next[g.code];
+                          return next;
+                        });
                       }}
                       disabled={busy}
                     >
                       Cancel
                     </Btn>
+                    </div>
                   </div>
                 )}
               </div>
