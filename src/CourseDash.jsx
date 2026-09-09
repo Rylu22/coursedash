@@ -292,6 +292,9 @@ const DEFAULT_LOGIC_SETTINGS = {
   historyMode: "boost", // "boost" | "sameCourse" | "differentCourse" | "smartWeight"
   allowRequests: true,
   requestWindowDays: 3,
+  useSuccessScore: false,
+  successPrioritizeQuantity: false,
+  successAvoidLows: false,
 };
 // Settings live per-series (shared by every group in a chain) or per-group for standalone groups.
 function logicSettingsKey(group) {
@@ -348,6 +351,148 @@ function computeDemandWeight(courses, students) {
   return weight;
 }
 
+// ---- Success score ----
+// Ranks the distinct grade levels among respondents lowest→highest (1, 2, 3, ...);
+// a student's "1st-choice" score is 3 × their grade's rank. Since that's always a
+// multiple of 3, their 2nd-choice score (exactly 2/3 of it) and 3rd-choice score
+// (exactly 1/3 of it) are always whole numbers too. Landing outside a student's
+// ranked top 3 scores 0.
+function buildGradeScoreFn(students) {
+  const grades = [...new Set(students.map((s) => s.grade))].sort((a, b) => a - b);
+  const rankByGrade = {};
+  grades.forEach((g, i) => (rankByGrade[g] = i + 1));
+  return (grade) => 3 * (rankByGrade[grade] || 1);
+}
+function successScoreFor(student, courseId, gradeScoreFn) {
+  const rank = (student.prefs || []).indexOf(courseId) + 1; // 0 when courseId isn't a ranked choice
+  if (rank < 1 || rank > 3) return 0;
+  const first = gradeScoreFn(student.grade);
+  if (rank === 1) return first;
+  if (rank === 2) return (first * 2) / 3;
+  return first / 3;
+}
+// Total success score of an already-computed result — used to display the score
+// regardless of whether it drove the assignment or is just being checked.
+function computeSuccessScore(students, assignments) {
+  const gradeScoreFn = buildGradeScoreFn(students);
+  let total = 0;
+  Object.entries(assignments).forEach(([courseId, list]) => {
+    list.forEach((s) => {
+      total += successScoreFor(s, courseId, gradeScoreFn);
+    });
+  });
+  return total;
+}
+
+// Generic min-cost max-flow via SPFA-based successive shortest augmenting paths (handles
+// negative edge costs, which we need since maximizing score = minimizing negative score;
+// there are no negative cycles here, just a source → students → courses → sink DAG plus
+// reverse edges). `edgeDefs` is [from, to, capacity, cost]. Returns the internal `to`/`cap`
+// arrays so the caller can tell which original edges carried flow (their cap drops to 0).
+function minCostMaxFlow(nodeCount, edgeDefs, source, sink) {
+  const graph = Array.from({ length: nodeCount }, () => []);
+  const to = [];
+  const cap = [];
+  const cost = [];
+  const addEdge = (u, v, c, w) => {
+    graph[u].push(to.length);
+    to.push(v);
+    cap.push(c);
+    cost.push(w);
+    graph[v].push(to.length);
+    to.push(u);
+    cap.push(0);
+    cost.push(-w);
+  };
+  edgeDefs.forEach(([u, v, c, w]) => addEdge(u, v, c, w));
+
+  while (true) {
+    const dist = new Array(nodeCount).fill(Infinity);
+    const inQueue = new Array(nodeCount).fill(false);
+    const prevEdge = new Array(nodeCount).fill(-1);
+    dist[source] = 0;
+    const queue = [source];
+    inQueue[source] = true;
+    while (queue.length) {
+      const u = queue.shift();
+      inQueue[u] = false;
+      for (const eid of graph[u]) {
+        if (cap[eid] > 0 && dist[u] + cost[eid] < dist[to[eid]]) {
+          dist[to[eid]] = dist[u] + cost[eid];
+          prevEdge[to[eid]] = eid;
+          if (!inQueue[to[eid]]) {
+            queue.push(to[eid]);
+            inQueue[to[eid]] = true;
+          }
+        }
+      }
+    }
+    if (dist[sink] === Infinity) break;
+    let aug = Infinity;
+    for (let v = sink; v !== source; v = to[prevEdge[v] ^ 1]) aug = Math.min(aug, cap[prevEdge[v]]);
+    for (let v = sink; v !== source; v = to[prevEdge[v] ^ 1]) {
+      cap[prevEdge[v]] -= aug;
+      cap[prevEdge[v] ^ 1] += aug;
+    }
+  }
+  return { cap };
+}
+
+// Reassigns students to courses to maximize total success score, subject to each course's
+// already-computed capacity (headcounts are never changed by this — it only decides WHO
+// fills each seat). When `avoidLows` is set, a student can only be matched to one of their
+// own ranked top-3 courses, so nobody the optimizer places ever lands outside their
+// preferences; anyone that constraint leaves unmatched comes back in `leftover` for the
+// caller to backfill the normal way.
+function optimizeAssignmentForScore(courses, students, capacity, avoidLows) {
+  const gradeScoreFn = buildGradeScoreFn(students);
+  const source = 0;
+  const studentBase = 1;
+  const courseBase = studentBase + students.length;
+  const sink = courseBase + courses.length;
+
+  const edgeDefs = [];
+  students.forEach((s, i) => edgeDefs.push([source, studentBase + i, 1, 0]));
+  courses.forEach((c, j) => edgeDefs.push([courseBase + j, sink, Math.max(0, capacity[c.id] || 0), 0]));
+
+  // One bipartite edge per eligible (student, course) pair. Its position in edgeDefs is
+  // recorded so the flow result can be read back afterward — minCostMaxFlow adds each
+  // edgeDefs entry as exactly 2 internal edges (forward, then reverse) in the same order,
+  // so edgeDefs[k] is always at internal index k*2.
+  const bipartite = [];
+  students.forEach((s, i) => {
+    courses.forEach((c, j) => {
+      const rank = (s.prefs || []).indexOf(c.id) + 1;
+      if (avoidLows && (rank < 1 || rank > 3)) return;
+      const score = rank >= 1 && rank <= 3 ? successScoreFor(s, c.id, gradeScoreFn) : 0;
+      bipartite.push({ edgeDefIndex: edgeDefs.length, studentIdx: i, courseIdx: j });
+      edgeDefs.push([studentBase + i, courseBase + j, 1, -score]);
+    });
+  });
+
+  const { cap } = minCostMaxFlow(sink + 1, edgeDefs, source, sink);
+
+  const courseIdxByStudent = new Map();
+  bipartite.forEach(({ edgeDefIndex, studentIdx, courseIdx }) => {
+    if (cap[edgeDefIndex * 2] === 0) courseIdxByStudent.set(studentIdx, courseIdx);
+  });
+
+  const assignments = {};
+  courses.forEach((c) => (assignments[c.id] = []));
+  const leftover = [];
+  students.forEach((s, i) => {
+    const courseIdx = courseIdxByStudent.get(i);
+    if (courseIdx === undefined) {
+      leftover.push(s);
+      return;
+    }
+    const course = courses[courseIdx];
+    const rank = (s.prefs || []).indexOf(course.id) + 1;
+    assignments[course.id].push({ ...s, choiceRank: rank >= 1 && rank <= 3 ? rank : null });
+  });
+  return { assignments, leftover };
+}
+
 function assignStudents(courses, students, priority = {}, settings = {}) {
   const {
     useGrade = true,
@@ -355,6 +500,9 @@ function assignStudents(courses, students, priority = {}, settings = {}) {
     useHistory = true,
     gradeDirection = "higher", // "higher" | "lower"
     order = ["history", "grade"], // tie-break priority order
+    useSuccessScore = false,
+    successPrioritizeQuantity = false,
+    successAvoidLows = false,
   } = settings;
   const activeFactors = order.filter((f) => (f === "history" ? useHistory : f === "grade" ? useGrade : true));
 
@@ -413,7 +561,27 @@ function assignStudents(courses, students, priority = {}, settings = {}) {
     return candidates[Math.floor(Math.random() * candidates.length)];
   };
 
-  if (!usePreference) {
+  if (useSuccessScore && (successPrioritizeQuantity || successAvoidLows)) {
+    // Success score check: instead of the round-based placement below, directly solve for
+    // the assignment that maximizes total success score. "Prioritize quantity" keeps every
+    // course's headcount exactly at its scaled capacity (same `capacity` as always) and just
+    // decides who fills each seat; "avoid lows" additionally restricts every match to one of
+    // that student's own top-3 ranked courses, so nobody optimized ever lands outside their
+    // preferences (avoidLows wins if both are somehow on, since it's the stricter guarantee).
+    const { assignments: optimized, leftover } = optimizeAssignmentForScore(courses, remaining, capacity, successAvoidLows);
+    Object.keys(assignments).forEach((cid) => {
+      assignments[cid] = optimized[cid] || [];
+    });
+    // Anyone the optimizer couldn't place (only possible under "avoid lows", when there isn't
+    // enough top-3 capacity for everyone) gets backfilled the same way any other leftover
+    // student would be, so the group still ends up fully placed wherever there's room.
+    [...leftover].sort(compareFlat).forEach((s) => {
+      const open = courses.filter((c) => assignments[c.id].length < capacity[c.id]);
+      const choice = pickNeediestCourse(open);
+      if (!choice) return;
+      assignments[choice.id].push(s);
+    });
+  } else if (!usePreference) {
     // Preference order ignored entirely: pool everyone, sort by whatever logic remains on
     // (history / grade / random), then place each into whichever open course needs
     // students most, to land as close as possible to the scaled targets.
@@ -5317,6 +5485,29 @@ function GroupEditor({ code }) {
             )}
 
             <Toggle
+              label="Success score check"
+              description="Scores each result by how well students' preferences were matched, weighted so a higher grade's #1 choice is worth more. Turn on one of the two settings below to actually optimize for it — on its own this only measures the score."
+              checked={settings.useSuccessScore}
+              onChange={(v) => updateSetting({ useSuccessScore: v })}
+            />
+            {settings.useSuccessScore && (
+              <div style={{ paddingLeft: 14 }}>
+                <Toggle
+                  label="Prioritize quantity"
+                  description="Maximizes the total score without changing any course's headcount — only decides who fills each seat."
+                  checked={settings.successPrioritizeQuantity}
+                  onChange={(v) => updateSetting({ successPrioritizeQuantity: v })}
+                />
+                <Toggle
+                  label="Avoid lows"
+                  description="Maximizes the score, but only among assignments where every student lands in one of their top 3 choices (headcounts may shift to make that possible)."
+                  checked={settings.successAvoidLows}
+                  onChange={(v) => updateSetting({ successAvoidLows: v })}
+                />
+              </div>
+            )}
+
+            <Toggle
               label="Previous results priority"
               description="In a series, past outcomes give students priority this time."
               checked={settings.useHistory}
@@ -5440,7 +5631,15 @@ function GroupEditor({ code }) {
                   <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
                     Targets are scaled proportionally to the {students.length} student{students.length === 1 ? "" : "s"} who responded — counts below show scaled seats vs. your entered target.
                   </p>
-                  <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    {settings.useSuccessScore && (
+                      <span
+                        title="Total success score — how well students' preferences were matched, weighted by grade"
+                        style={{ fontFamily: mono, fontSize: 12, fontWeight: 700, color: green, background: greenSoft, padding: "5px 10px", borderRadius: 6, whiteSpace: "nowrap" }}
+                      >
+                        Success score: {computeSuccessScore(students, result.assignments)}
+                      </span>
+                    )}
                     <IconBtn onClick={loadGroup}>
                       <RefreshCw size={14} /> Refresh
                     </IconBtn>
