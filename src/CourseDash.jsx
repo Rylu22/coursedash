@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
-  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid,
+  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2,
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient.js";
 
@@ -2112,7 +2112,9 @@ function AdminTesting({ onEnterAccount, onOpenQuickFill }) {
   const [testUsers, setTestUsers] = useState(null);
   const [testGroups, setTestGroups] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [selectedAccounts, setSelectedAccounts] = useState(new Set()); // test teacher/student emails
+  const [selectedGroups, setSelectedGroups] = useState(new Set()); // test group codes
+  const [confirm, setConfirm] = useState(null); // { emails, codes, label }
 
   const load = useCallback(async () => {
     const keys = await storeList("user:", true);
@@ -2120,10 +2122,15 @@ function AdminTesting({ onEnterAccount, onOpenQuickFill }) {
     const tUsers = recs.filter((u) => u.isTest);
     setTestUsers(tUsers);
 
-    const testTeacherEmails = new Set(tUsers.filter((u) => u.role === "teacher").map((u) => u.email));
+    const teacherNameByEmail = {};
+    tUsers.filter((u) => u.role === "teacher").forEach((t) => {
+      teacherNameByEmail[t.email] = t.name;
+    });
     const groupKeys = await storeList("group:", true);
     const groupRecs = (await Promise.all(groupKeys.map((k) => storeGet(k, true).then(normalizeGroup)))).filter(Boolean);
-    setTestGroups(groupRecs.filter((g) => testTeacherEmails.has(g.teacherEmail)));
+    setTestGroups(
+      groupRecs.filter((g) => g.teacherEmail in teacherNameByEmail).map((g) => ({ ...g, teacherName: teacherNameByEmail[g.teacherEmail] }))
+    );
   }, []);
 
   useEffect(() => {
@@ -2137,24 +2144,52 @@ function AdminTesting({ onEnterAccount, onOpenQuickFill }) {
     setBusy(false);
   };
 
-  const deleteTestAccount = async (u) => {
+  const toggleAccount = (email) =>
+    setSelectedAccounts((prev) => {
+      const next = new Set(prev);
+      next.has(email) ? next.delete(email) : next.add(email);
+      return next;
+    });
+  const toggleAccountsInList = (emails) =>
+    setSelectedAccounts((prev) => {
+      const allSelected = emails.length > 0 && emails.every((e) => prev.has(e));
+      const next = new Set(prev);
+      emails.forEach((e) => (allSelected ? next.delete(e) : next.add(e)));
+      return next;
+    });
+  const toggleGroup = (code) =>
+    setSelectedGroups((prev) => {
+      const next = new Set(prev);
+      next.has(code) ? next.delete(code) : next.add(code);
+      return next;
+    });
+  const toggleAllGroups = () => {
+    const codes = (testGroups || []).map((g) => g.code);
+    setSelectedGroups((prev) => (codes.every((c) => prev.has(c)) && codes.length > 0 ? new Set() : new Set(codes)));
+  };
+
+  const buildConfirmation = (emails, codes, label) => setConfirm({ emails, codes, label });
+
+  const runDelete = async () => {
+    if (!confirm) return;
     setBusy(true);
-    await storeDelete(`user:${safeKey(u.email)}`, true);
-    setConfirmDelete(null);
-    await load();
+    for (const code of confirm.codes) {
+      const g = (testGroups || []).find((gr) => gr.code === code);
+      if (g) await permanentlyDeleteGroup(g);
+    }
+    for (const email of confirm.emails) {
+      await storeDelete(`user:${safeKey(email)}`, true);
+    }
     setBusy(false);
+    setConfirm(null);
+    setSelectedAccounts(new Set());
+    setSelectedGroups(new Set());
+    load();
   };
 
   const teachers = (testUsers || []).filter((u) => u.role === "teacher");
   const students = (testUsers || []).filter((u) => u.role === "student");
-
-  const groupsByTeacherEmail = {};
-  teachers.forEach((t) => {
-    groupsByTeacherEmail[t.email] = (testGroups || [])
-      .filter((g) => g.teacherEmail === t.email)
-      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-      .map((g, i) => ({ ...g, testGroupLabel: `${t.testLabel}${i + 1}` }));
-  });
+  const selectedCount = selectedAccounts.size + selectedGroups.size;
 
   return (
     <div>
@@ -2170,102 +2205,159 @@ function AdminTesting({ onEnterAccount, onOpenQuickFill }) {
         </Btn>
       </div>
 
-      {testUsers === null ? (
-        <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
-      ) : (
-        <>
-          <TestAccountGroup title="Teachers" users={teachers} groupsByEmail={groupsByTeacherEmail} onEnterAccount={onEnterAccount} onDelete={setConfirmDelete} onOpenQuickFill={onOpenQuickFill} />
-          <TestAccountGroup title="Students" users={students} onEnterAccount={onEnterAccount} onDelete={setConfirmDelete} />
-        </>
+      {selectedCount > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, background: claySoft, border: `1px solid ${clay}55`, borderRadius: 8, padding: "9px 14px", marginBottom: 16 }}>
+          <span style={{ fontSize: 13, color: clay, fontWeight: 700, flex: 1 }}>
+            {selectedCount} selected ({selectedAccounts.size} account{selectedAccounts.size === 1 ? "" : "s"}, {selectedGroups.size} group{selectedGroups.size === 1 ? "" : "s"})
+          </span>
+          <IconBtn
+            tone="clay"
+            onClick={() => buildConfirmation([...selectedAccounts], [...selectedGroups], `${selectedCount} selected item${selectedCount === 1 ? "" : "s"}`)}
+          >
+            <Trash2 size={13} /> Delete selected
+          </IconBtn>
+          <button
+            onClick={() => {
+              setSelectedAccounts(new Set());
+              setSelectedGroups(new Set());
+            }}
+            style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", fontSize: 12.5, fontFamily: sans }}
+          >
+            Clear
+          </button>
+        </div>
       )}
 
-      {confirmDelete && (
+      {confirm && (
         <div
-          onClick={() => !busy && setConfirmDelete(null)}
+          onClick={() => !busy && setConfirm(null)}
           style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
         >
-          <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 340, maxWidth: "100%" }}>
-            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 10px" }}>Delete {confirmDelete.name}?</h3>
-            <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 14 }}>This only removes the test account — it doesn't affect any real accounts or groups.</p>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 360, maxWidth: "100%" }}>
+            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 10px" }}>Delete {confirm.label}?</h3>
+            <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 14 }}>This only removes test data — it doesn't affect any real accounts or groups.</p>
             <div style={{ display: "flex", gap: 8 }}>
-              <Btn tone="clay" onClick={() => deleteTestAccount(confirmDelete)} disabled={busy}>
+              <Btn tone="clay" onClick={runDelete} disabled={busy}>
                 {busy ? "Deleting…" : "Delete"}
               </Btn>
-              <Btn tone="ghost" onClick={() => setConfirmDelete(null)} disabled={busy}>
+              <Btn tone="ghost" onClick={() => setConfirm(null)} disabled={busy}>
                 Cancel
               </Btn>
             </div>
           </div>
         </div>
       )}
+
+      {testUsers === null ? (
+        <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>
+      ) : (
+        <>
+          <TestAccountGroup
+            title="Teachers"
+            users={teachers}
+            selected={selectedAccounts}
+            onToggle={toggleAccount}
+            onToggleAll={toggleAccountsInList}
+            onEnterAccount={onEnterAccount}
+            onDelete={(u) => buildConfirmation([u.email], [], `the test account "${u.name}"`)}
+          />
+          <TestAccountGroup
+            title="Students"
+            users={students}
+            selected={selectedAccounts}
+            onToggle={toggleAccount}
+            onToggleAll={toggleAccountsInList}
+            onEnterAccount={onEnterAccount}
+            onDelete={(u) => buildConfirmation([u.email], [], `the test account "${u.name}"`)}
+          />
+          <TestGroupsSection
+            groups={testGroups || []}
+            selected={selectedGroups}
+            onToggle={toggleGroup}
+            onToggleAll={toggleAllGroups}
+            onOpenQuickFill={onOpenQuickFill}
+            onDelete={(g) => buildConfirmation([], [g.code], `the group "${g.name}" (${g.code})`)}
+          />
+        </>
+      )}
     </div>
   );
 }
 
-function TestAccountGroup({ title, users, groupsByEmail, onEnterAccount, onDelete, onOpenQuickFill }) {
+function TestAccountGroup({ title, users, selected, onToggle, onToggleAll, onEnterAccount, onDelete }) {
+  const emails = users.map((u) => u.email);
   return (
     <div style={{ marginBottom: 18 }}>
-      <div style={{ fontSize: 11, fontFamily: mono, letterSpacing: 1, textTransform: "uppercase", color: inkSoft, marginBottom: 8 }}>{title}</div>
+      <div style={{ fontSize: 11, fontFamily: mono, letterSpacing: 1, textTransform: "uppercase", color: inkSoft, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
+        {title}
+        {users.length > 0 && (
+          <button
+            onClick={() => onToggleAll(emails)}
+            style={{ background: "none", border: "none", color: green, cursor: "pointer", fontSize: 11, fontFamily: sans, fontWeight: 700, textTransform: "none", letterSpacing: 0 }}
+          >
+            Select all
+          </button>
+        )}
+      </div>
       {users.length === 0 ? (
         <p style={{ color: inkSoft, fontSize: 13 }}>None yet.</p>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          {users.map((u) => {
-            const groups = groupsByEmail?.[u.email] || [];
-            return (
-              <div key={u.email} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13.5 }}>
-                  <span style={{ flex: 1, fontWeight: 600 }}>{u.name}</span>
-                  <IconBtn tone="green" title="Enter this account" onClick={() => onEnterAccount?.(u)}>
-                    <LogIn size={13} /> Enter
-                  </IconBtn>
-                  <IconBtn tone="clay" title="Delete test account" onClick={() => onDelete(u)}>
-                    <Trash2 size={13} />
-                  </IconBtn>
-                </div>
-                {groups.length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${line}` }}>
-                    {groups.map((g) => (
-                      <button
-                        key={g.code}
-                        onClick={() => onOpenQuickFill?.(g.code)}
-                        title="Quick fill test responses for this group"
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          fontSize: 12.5,
-                          background: "none",
-                          border: "none",
-                          padding: "3px 0",
-                          font: "inherit",
-                          cursor: onOpenQuickFill ? "pointer" : "default",
-                          color: ink,
-                          textAlign: "left",
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontFamily: mono,
-                            fontSize: 10.5,
-                            fontWeight: 700,
-                            padding: "2px 6px",
-                            borderRadius: 5,
-                            background: "#E4E9F1",
-                            color: inkSoft,
-                          }}
-                        >
-                          {g.testGroupLabel}
-                        </span>
-                        <span style={{ flex: 1 }}>{g.name}</span>
-                        <LayoutGrid size={12} style={{ color: inkSoft }} />
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {users.map((u) => (
+            <div key={u.email} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
+              <input
+                type="checkbox"
+                checked={selected.has(u.email)}
+                onChange={() => onToggle(u.email)}
+                style={{ width: 15, height: 15, cursor: "pointer" }}
+              />
+              <span style={{ flex: 1, fontWeight: 600 }}>{u.name}</span>
+              <IconBtn tone="green" title="Enter this account" onClick={() => onEnterAccount?.(u)}>
+                <LogIn size={13} /> Enter
+              </IconBtn>
+              <IconBtn tone="clay" title="Delete test account" onClick={() => onDelete(u)}>
+                <Trash2 size={13} />
+              </IconBtn>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Every group belonging to a test teacher, moved here out of the main Accounts &
+// Groups tab so test data stays fully separate from real accounts and groups.
+function TestGroupsSection({ groups, selected, onToggle, onToggleAll, onOpenQuickFill, onDelete }) {
+  return (
+    <div>
+      <div style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+        <LayoutGrid size={16} color={green} />
+        <span style={{ fontWeight: 700, fontSize: 14, fontFamily: sans }}>Test groups</span>
+        {groups.length > 0 && (
+          <button onClick={onToggleAll} style={{ background: "none", border: "none", color: green, cursor: "pointer", fontSize: 12, fontFamily: sans, fontWeight: 700 }}>
+            Select all
+          </button>
+        )}
+      </div>
+      {groups.length === 0 ? (
+        <p style={{ color: inkSoft, fontSize: 13 }}>None yet — groups a test teacher creates will show up here.</p>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {groups.map((g) => (
+            <div key={g.code} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
+              <input type="checkbox" checked={selected.has(g.code)} onChange={() => onToggle(g.code)} style={{ width: 15, height: 15, cursor: "pointer" }} />
+              <span style={{ flex: 1, fontWeight: 600 }}>{g.name}</span>
+              <span style={{ fontFamily: mono, fontSize: 11, color: gold, background: goldSoft, padding: "2px 7px", borderRadius: 4 }}>{g.code}</span>
+              <span style={{ color: inkSoft, fontSize: 12.5 }}>{g.teacherName || g.teacherEmail}</span>
+              <IconBtn tone="ink" title="Quick fill test responses for this group" onClick={() => onOpenQuickFill?.(g.code)}>
+                <LayoutGrid size={13} /> Quick fill
+              </IconBtn>
+              <IconBtn tone="clay" title="Delete group" onClick={() => onDelete(g)}>
+                <Trash2 size={13} />
+              </IconBtn>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -2294,6 +2386,10 @@ function QuickFillGrid({ code }) {
   // Click-to-place mode: while a rank is selected here, clicking any cell places
   // it there (selection stays active so several cells can be filled in a row).
   const [selectedRank, setSelectedRank] = useState(null);
+  // Snapshots of `rows` for undo/redo — every row-changing edit (a move, a clear, a
+  // grade change, adding/removing a student) pushes the pre-edit rows here first.
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitMessage, setSubmitMessage] = useState("");
   const [loading, setLoading] = useState(true);
@@ -2325,6 +2421,8 @@ function QuickFillGrid({ code }) {
         assignments: Object.fromEntries((s.prefs || []).filter(Boolean).map((courseId, i) => [courseId, i + 1])),
       }));
     setRows(existingRows);
+    setUndoStack([]);
+    setRedoStack([]);
     setLoading(false);
   }, [code]);
 
@@ -2337,10 +2435,33 @@ function QuickFillGrid({ code }) {
   const addedIds = new Set(rows.map((r) => r.studentId));
   const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email)));
 
+  // Every row-changing action goes through here instead of setRows directly, so it
+  // can be undone. Caps history at 50 steps so the stack can't grow unbounded.
+  const updateRows = (updater) => {
+    const next = typeof updater === "function" ? updater(rows) : updater;
+    setUndoStack((prev) => [...prev.slice(-49), rows]);
+    setRedoStack([]);
+    setRows(next);
+  };
+  const undo = () => {
+    if (undoStack.length === 0) return;
+    const prevRows = undoStack[undoStack.length - 1];
+    setUndoStack(undoStack.slice(0, -1));
+    setRedoStack((prev) => [...prev, rows]);
+    setRows(prevRows);
+  };
+  const redo = () => {
+    if (redoStack.length === 0) return;
+    const nextRows = redoStack[redoStack.length - 1];
+    setRedoStack(redoStack.slice(0, -1));
+    setUndoStack((prev) => [...prev, rows]);
+    setRows(nextRows);
+  };
+
   const addStudentRow = (student) => {
     const studentId = safeKey(student.email);
     if (addedIds.has(studentId)) return;
-    setRows((prev) => [...prev, { studentId, name: student.name, email: student.email, grade: "", assignments: {} }]);
+    updateRows((prev) => [...prev, { studentId, name: student.name, email: student.email, grade: "", assignments: {} }]);
     setShowAddPicker(false);
   };
 
@@ -2352,8 +2473,8 @@ function QuickFillGrid({ code }) {
     setCreatingStudent(false);
   };
 
-  const removeRow = (studentId) => setRows((prev) => prev.filter((r) => r.studentId !== studentId));
-  const setGradeFor = (studentId, v) => setRows((prev) => prev.map((r) => (r.studentId === studentId ? { ...r, grade: v } : r)));
+  const removeRow = (studentId) => updateRows((prev) => prev.filter((r) => r.studentId !== studentId));
+  const setGradeFor = (studentId, v) => updateRows((prev) => prev.map((r) => (r.studentId === studentId ? { ...r, grade: v } : r)));
 
   // Places `rank` at `target` ({studentId, courseId}). If `origin` is given (the box
   // was dragged off an already-filled cell rather than the corner palette) and it's
@@ -2363,7 +2484,7 @@ function QuickFillGrid({ code }) {
   // appears at most once per row) and whatever previously sat in the target cell is
   // overwritten — matching "the same choice on that row is removed and replaced."
   const moveChoice = (rank, origin, target) => {
-    setRows((prev) =>
+    updateRows((prev) =>
       prev.map((r) => {
         if (origin && r.studentId === origin.studentId && r.studentId !== target.studentId) {
           if (r.assignments[origin.courseId] !== rank) return r;
@@ -2383,7 +2504,7 @@ function QuickFillGrid({ code }) {
     );
   };
   const clearCell = (studentId, courseId) => {
-    setRows((prev) =>
+    updateRows((prev) =>
       prev.map((r) => {
         if (r.studentId !== studentId) return r;
         const next = { ...r.assignments };
@@ -2633,7 +2754,7 @@ function QuickFillGrid({ code }) {
               <GripVertical size={12} style={{ flexShrink: 0, marginTop: 1 }} />
               Drag a box onto the grid, or click one then click cells to fill them.
             </p>
-            <div style={{ display: "flex", gap: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               {Array.from({ length: choiceCount }, (_, i) => i + 1).map((rank) => {
                 const selected = selectedRank === rank;
                 return (
@@ -2671,6 +2792,15 @@ function QuickFillGrid({ code }) {
                   </div>
                 );
               })}
+              <div style={{ width: 1, alignSelf: "stretch", background: line, margin: "6px 2px" }} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <IconBtn title="Undo" onClick={undo} disabled={undoStack.length === 0}>
+                  <Undo2 size={14} />
+                </IconBtn>
+                <IconBtn title="Redo" onClick={redo} disabled={redoStack.length === 0}>
+                  <Redo2 size={14} />
+                </IconBtn>
+              </div>
             </div>
           </div>
         </>
@@ -2985,10 +3115,12 @@ function AdminDashboard({ onEnterAccount }) {
     const userKeys = await storeList("user:", true);
     const userRecs = (await Promise.all(userKeys.map((k) => storeGet(k, true)))).filter(Boolean);
     setUsers(userRecs.filter((u) => !u.isTest));
+    // Test teachers' groups live in the Testing tab's "Test groups" section instead.
+    const testTeacherEmails = new Set(userRecs.filter((u) => u.isTest && u.role === "teacher").map((u) => u.email));
 
     const groupKeys = await storeList("group:", true);
     const groupRecs = (await Promise.all(groupKeys.map((k) => storeGet(k, true).then(normalizeGroup)))).filter(Boolean);
-    setGroups(groupRecs);
+    setGroups(groupRecs.filter((g) => !testTeacherEmails.has(g.teacherEmail)));
   }, []);
 
   useEffect(() => {
