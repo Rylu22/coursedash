@@ -2419,6 +2419,8 @@ function QuickFillGrid({ code }) {
         email: s.email,
         grade: s.grade != null ? String(s.grade) : "",
         assignments: Object.fromEntries((s.prefs || []).filter(Boolean).map((courseId, i) => [courseId, i + 1])),
+        extraAnswers: s.extraAnswers || {},
+        createdAt: s.createdAt || null,
       }));
     setRows(existingRows);
     setUndoStack([]);
@@ -2461,7 +2463,7 @@ function QuickFillGrid({ code }) {
   const addStudentRow = (student) => {
     const studentId = safeKey(student.email);
     if (addedIds.has(studentId)) return;
-    updateRows((prev) => [...prev, { studentId, name: student.name, email: student.email, grade: "", assignments: {} }]);
+    updateRows((prev) => [...prev, { studentId, name: student.name, email: student.email, grade: "", assignments: {}, extraAnswers: {} }]);
     setShowAddPicker(false);
   };
 
@@ -2475,6 +2477,8 @@ function QuickFillGrid({ code }) {
 
   const removeRow = (studentId) => updateRows((prev) => prev.filter((r) => r.studentId !== studentId));
   const setGradeFor = (studentId, v) => updateRows((prev) => prev.map((r) => (r.studentId === studentId ? { ...r, grade: v } : r)));
+  const setExtraAnswerFor = (studentId, questionId, v) =>
+    updateRows((prev) => prev.map((r) => (r.studentId === studentId ? { ...r, extraAnswers: { ...r.extraAnswers, [questionId]: v } } : r)));
 
   // Places `rank` at `target` ({studentId, courseId}). If `origin` is given (the box
   // was dragged off an already-filled cell rather than the corner palette) and it's
@@ -2514,11 +2518,16 @@ function QuickFillGrid({ code }) {
     );
   };
 
+  const extraQuestions = group?.extraQuestions || [];
+  const requiredQuestions = extraQuestions.filter((q) => q.required);
+
   const rowStatus = (row) => {
     const assignedCount = Object.keys(row.assignments).length;
     const hasGrade = row.grade !== "" && row.grade != null;
-    if (assignedCount === 0 && !hasGrade) return "empty";
-    if (assignedCount === choiceCount && hasGrade) return "full";
+    const anyExtraAnswered = Object.values(row.extraAnswers || {}).some((v) => (v || "").trim());
+    const missingRequired = requiredQuestions.some((q) => !(row.extraAnswers?.[q.id] || "").trim());
+    if (assignedCount === 0 && !hasGrade && !anyExtraAnswered) return "empty";
+    if (assignedCount === choiceCount && hasGrade && !missingRequired) return "full";
     return "partial";
   };
 
@@ -2532,7 +2541,11 @@ function QuickFillGrid({ code }) {
       fullRows.map(async (r) => {
         const prefs = Array.from({ length: choiceCount }, (_, i) => Object.entries(r.assignments).find(([, rank]) => rank === i + 1)?.[0]);
         const key = `submission:${code}:${r.studentId}`;
-        await storeSet(key, { id: r.studentId, name: r.name, email: r.email, grade: Number(r.grade), prefs }, true);
+        await storeSet(
+          key,
+          { id: r.studentId, name: r.name, email: r.email, grade: Number(r.grade), prefs, extraAnswers: r.extraAnswers || {}, createdAt: r.createdAt || Date.now() },
+          true
+        );
         // Same index StudentSurvey maintains, so this shows up in the student's own Active Groups tab too.
         const indexKey = `student-groups:${r.studentId}`;
         const existing = (await storeGet(indexKey, true)) || [];
@@ -2562,7 +2575,7 @@ function QuickFillGrid({ code }) {
       ) : (
         <>
           <div style={{ overflowX: "auto", background: "#fff", border: `1px solid ${line}`, borderRadius: 10 }}>
-            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 380 + courses.length * 110 }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 380 + courses.length * 110 + extraQuestions.length * 160 }}>
               <thead>
                 <tr>
                   <th style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 200 }}>
@@ -2575,6 +2588,15 @@ function QuickFillGrid({ code }) {
                       style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: "10px 12px", fontFamily: serif, fontSize: 14.5, minWidth: 110 }}
                     >
                       {c.name || "(unnamed)"}
+                    </th>
+                  ))}
+                  {extraQuestions.map((q) => (
+                    <th
+                      key={q.id}
+                      style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: "10px 12px", fontFamily: sans, fontSize: 12.5, fontWeight: 700, minWidth: 160, textAlign: "left" }}
+                    >
+                      {q.text || "(untitled question)"}
+                      {q.required && <span style={{ color: clay }}> *</span>}
                     </th>
                   ))}
                   <th style={{ borderBottom: `1px solid ${line}`, width: 36 }} />
@@ -2661,6 +2683,16 @@ function QuickFillGrid({ code }) {
                           </td>
                         );
                       })}
+                      {extraQuestions.map((q) => (
+                        <td key={q.id} style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: "8px 10px" }}>
+                          <input
+                            value={r.extraAnswers?.[q.id] || ""}
+                            onChange={(e) => setExtraAnswerFor(r.studentId, q.id, e.target.value)}
+                            placeholder={q.required ? "Required" : "Answer"}
+                            style={{ width: "100%", minWidth: 130, border: `1px solid ${line}`, borderRadius: 6, padding: "4px 6px", fontFamily: sans, fontSize: 12.5, boxSizing: "border-box" }}
+                          />
+                        </td>
+                      ))}
                       <td style={{ borderBottom: `1px solid ${line}`, textAlign: "center" }}>
                         <IconBtn tone="clay" title="Remove row" onClick={() => removeRow(r.studentId)}>
                           <X size={12} />
@@ -2671,7 +2703,7 @@ function QuickFillGrid({ code }) {
                 })}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={courses.length + 3} style={{ padding: "18px 12px", color: inkSoft, fontSize: 13 }}>
+                    <td colSpan={courses.length + extraQuestions.length + 3} style={{ padding: "18px 12px", color: inkSoft, fontSize: 13 }}>
                       No students added yet — use "Add test student" below.
                     </td>
                   </tr>
@@ -4117,7 +4149,9 @@ function TeacherDashboard({ user, onOpenGroup }) {
                     }}
                   >
                     <div>
-                      <div style={{ fontFamily: serif, fontSize: 16, fontWeight: 700 }}>{g.name}</div>
+                      <div style={{ fontFamily: serif, fontSize: 16, fontWeight: 700 }}>
+                        {g.name} <span style={{ fontWeight: 400, color: inkSoft, fontSize: 14 }}>({g.studentCount})</span>
+                      </div>
                       <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>
                         {g.courses.length} courses · {g.studentCount} responses {i === chain.groups.length - 1 && "· most recent"}
                       </div>
@@ -4210,7 +4244,9 @@ function TeacherDashboard({ user, onOpenGroup }) {
                     }}
                   >
                     <div>
-                      <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 700 }}>{g.name}</div>
+                      <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 700 }}>
+                        {g.name} <span style={{ fontWeight: 400, color: inkSoft, fontSize: 14 }}>({g.studentCount})</span>
+                      </div>
                       <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>
                         {g.courses.length} courses · {g.studentCount} responses
                       </div>
@@ -4483,6 +4519,7 @@ function GroupEditor({ code }) {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [studentSearch, setStudentSearch] = useState("");
+  const [studentSort, setStudentSort] = useState("name"); // name | grade | choice1 | choice2 | choice3 | submitted
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_LOGIC_SETTINGS);
   const [dragStudent, setDragStudent] = useState(null); // { studentId, fromCourseId } — fromCourseId null = from Unassigned
@@ -4574,9 +4611,10 @@ function GroupEditor({ code }) {
     await storeSet(`group:${code}`, { ...group, courses, extraQuestions: next }, true);
     setSavingQuestions(false);
   };
-  const addQuestion = () => saveQuestions([...extraQuestions, { id: genId(), text: "" }]);
+  const addQuestion = () => saveQuestions([...extraQuestions, { id: genId(), text: "", required: false }]);
   const updateQuestionLocal = (id, patch) => setExtraQuestions(extraQuestions.map((q) => (q.id === id ? { ...q, ...patch } : q)));
   const commitQuestion = () => saveQuestions(extraQuestions);
+  const toggleQuestionRequired = (id) => saveQuestions(extraQuestions.map((q) => (q.id === id ? { ...q, required: !q.required } : q)));
   const removeQuestion = (id) => saveQuestions(extraQuestions.filter((q) => q.id !== id));
 
   const updateStatus = async (status) => {
@@ -4624,6 +4662,38 @@ function GroupEditor({ code }) {
   const removeStudent = async (studentId) => {
     await storeDelete(`submission:${code}:${studentId}`, true);
     setStudents(students.filter((s) => s.id !== studentId));
+  };
+
+  // Course name a student picked as their Nth choice (idx is 0-based), for sorting
+  // the Students list by choice — students without that many ranked choices sort last.
+  const choiceNameAt = (s, idx) => courses.find((c) => c.id === s.prefs?.[idx])?.name || "";
+  const sortStudents = (list) => {
+    const sorted = [...list];
+    switch (studentSort) {
+      case "grade":
+        sorted.sort((a, b) => (a.grade ?? 0) - (b.grade ?? 0) || a.name.localeCompare(b.name));
+        break;
+      case "choice1":
+      case "choice2":
+      case "choice3": {
+        const idx = Number(studentSort.slice(-1)) - 1;
+        sorted.sort((a, b) => {
+          const an = choiceNameAt(a, idx);
+          const bn = choiceNameAt(b, idx);
+          if (!an && bn) return 1;
+          if (an && !bn) return -1;
+          return an.localeCompare(bn) || a.name.localeCompare(b.name);
+        });
+        break;
+      }
+      case "submitted":
+        sorted.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        break;
+      case "name":
+      default:
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return sorted;
   };
 
   const canRun = courses.length >= 2 && courses.every((c) => c.name.trim()) && students.length > 0;
@@ -4897,7 +4967,7 @@ function GroupEditor({ code }) {
             <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${line}` }}>
               <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 700, marginBottom: 4 }}>Extra survey questions</div>
               <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 12 }}>
-                Optional free-response questions shown to students under their course choices when they join. They don't affect placement.
+                Free-response questions shown to students under their course choices when they join. They don't affect placement. Mark one required to block submission until it's answered.
               </p>
               <div style={{ display: "grid", gap: 10 }}>
                 {extraQuestions.map((q, i) => (
@@ -4910,6 +4980,10 @@ function GroupEditor({ code }) {
                       placeholder="Question for students"
                       style={{ flex: 1, border: "none", outline: "none", fontFamily: sans, fontSize: 13.5, background: "transparent", color: ink }}
                     />
+                    <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: inkSoft, whiteSpace: "nowrap", cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!q.required} onChange={() => toggleQuestionRequired(q.id)} style={{ width: 14, height: 14, cursor: "pointer" }} />
+                      Required
+                    </label>
                     <IconBtn tone="clay" onClick={() => removeQuestion(q.id)} title="Remove question">
                       <X size={14} />
                     </IconBtn>
@@ -4937,22 +5011,33 @@ function GroupEditor({ code }) {
               </IconBtn>
             </div>
             {students.length > 0 && (
-              <div style={{ position: "relative", marginBottom: 10 }}>
-                <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: inkSoft }} />
-                <input
-                  value={studentSearch}
-                  onChange={(e) => setStudentSearch(e.target.value)}
-                  placeholder="Search students by name or email…"
-                  style={{ ...inputStyle, paddingLeft: 30, fontSize: 13 }}
-                />
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                <div style={{ position: "relative", flex: 1 }}>
+                  <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: inkSoft }} />
+                  <input
+                    value={studentSearch}
+                    onChange={(e) => setStudentSearch(e.target.value)}
+                    placeholder="Search students by name or email…"
+                    style={{ ...inputStyle, paddingLeft: 30, fontSize: 13 }}
+                  />
+                </div>
+                <select value={studentSort} onChange={(e) => setStudentSort(e.target.value)} style={{ ...inputStyle, width: "auto", fontSize: 13 }}>
+                  <option value="name">Sort: Name (A–Z)</option>
+                  <option value="grade">Sort: Grade</option>
+                  <option value="choice1">Sort: 1st choice</option>
+                  <option value="choice2">Sort: 2nd choice</option>
+                  <option value="choice3">Sort: 3rd choice</option>
+                  <option value="submitted">Sort: Submission order</option>
+                </select>
               </div>
             )}
             <div style={{ display: "grid", gap: 8 }}>
-              {students
-                .filter((s) => {
+              {sortStudents(
+                students.filter((s) => {
                   const q = studentSearch.trim().toLowerCase();
                   return !q || s.name.toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
                 })
+              )
                 .map((s) => {
                   const expanded = expandedStudent === s.id;
                   return (
@@ -5903,6 +5988,7 @@ function StudentSurvey({ code, user, onDone }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [isEdit, setIsEdit] = useState(false);
+  const [createdAt, setCreatedAt] = useState(null); // preserved across edits, for "submission order" sorting
 
   useEffect(() => {
     (async () => {
@@ -5914,6 +6000,7 @@ function StudentSurvey({ code, user, onDone }) {
         setGrade(String(existing.grade));
         setPrefs([...existing.prefs, "", ""].slice(0, 3));
         setExtraAnswers(existing.extraAnswers || {});
+        setCreatedAt(existing.createdAt || null);
       }
     })();
   }, [code, user.email]);
@@ -5934,11 +6021,13 @@ function StudentSurvey({ code, user, onDone }) {
     const chosen = prefs.slice(0, choiceCount);
     if (chosen.some((p) => !p)) return setError(`Choose all ${choiceCount} courses, in order of preference.`);
     if (new Set(chosen).size < choiceCount) return setError(`Choose ${choiceCount} different courses.`);
+    const missingRequired = (group.extraQuestions || []).find((q) => q.required && !(extraAnswers[q.id] || "").trim());
+    if (missingRequired) return setError(`Please answer: ${missingRequired.text || "the required question"}`);
     setBusy(true);
     const key = `submission:${code}:${safeKey(user.email)}`;
     await storeSet(
       key,
-      { id: safeKey(user.email), name: user.name, email: user.email, grade: Number(grade), prefs: chosen, extraAnswers },
+      { id: safeKey(user.email), name: user.name, email: user.email, grade: Number(grade), prefs: chosen, extraAnswers, createdAt: createdAt || Date.now() },
       true
     );
     // Track which groups this student has responded to, so their "Active Groups"
@@ -5976,7 +6065,7 @@ function StudentSurvey({ code, user, onDone }) {
           </Field>
         ))}
         {(group.extraQuestions || []).map((q) => (
-          <Field key={q.id} label={q.text || "Question"}>
+          <Field key={q.id} label={`${q.text || "Question"}${q.required ? " *" : ""}`}>
             <input
               style={inputStyle}
               value={extraAnswers[q.id] || ""}
