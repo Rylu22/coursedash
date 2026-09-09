@@ -357,8 +357,15 @@ function computeDemandWeight(courses, students) {
 // multiple of 3, their 2nd-choice score (exactly 2/3 of it) and 3rd-choice score
 // (exactly 1/3 of it) are always whole numbers too. Landing outside a student's
 // ranked top 3 scores 0.
-function buildGradeScoreFn(students) {
-  const grades = [...new Set(students.map((s) => s.grade))].sort((a, b) => a - b);
+//
+// This mirrors the Grade priority setting rather than always favoring higher grades:
+// with Grade priority off, grade doesn't factor in at all — every student scores a
+// flat 3/2/1. With it on and set to "lower grade first," the ranking flips so the
+// lowest grade earns the highest score instead of the highest grade.
+function buildGradeScoreFn(students, settings = {}) {
+  if (settings.useGrade === false) return () => 3;
+  const descending = settings.gradeDirection === "lower";
+  const grades = [...new Set(students.map((s) => s.grade))].sort((a, b) => (descending ? b - a : a - b));
   const rankByGrade = {};
   grades.forEach((g, i) => (rankByGrade[g] = i + 1));
   return (grade) => 3 * (rankByGrade[grade] || 1);
@@ -373,8 +380,8 @@ function successScoreFor(student, courseId, gradeScoreFn) {
 }
 // Total success score of an already-computed result — used to display the score
 // regardless of whether it drove the assignment or is just being checked.
-function computeSuccessScore(students, assignments) {
-  const gradeScoreFn = buildGradeScoreFn(students);
+function computeSuccessScore(students, assignments, settings = {}) {
+  const gradeScoreFn = buildGradeScoreFn(students, settings);
   let total = 0;
   Object.entries(assignments).forEach(([courseId, list]) => {
     list.forEach((s) => {
@@ -444,8 +451,8 @@ function minCostMaxFlow(nodeCount, edgeDefs, source, sink) {
 // own ranked top-3 courses, so nobody the optimizer places ever lands outside their
 // preferences; anyone that constraint leaves unmatched comes back in `leftover` for the
 // caller to backfill the normal way.
-function optimizeAssignmentForScore(courses, students, capacity, avoidLows) {
-  const gradeScoreFn = buildGradeScoreFn(students);
+function optimizeAssignmentForScore(courses, students, capacity, avoidLows, settings) {
+  const gradeScoreFn = buildGradeScoreFn(students, settings);
   const source = 0;
   const studentBase = 1;
   const courseBase = studentBase + students.length;
@@ -568,7 +575,7 @@ function assignStudents(courses, students, priority = {}, settings = {}) {
     // decides who fills each seat; "avoid lows" additionally restricts every match to one of
     // that student's own top-3 ranked courses, so nobody optimized ever lands outside their
     // preferences (avoidLows wins if both are somehow on, since it's the stricter guarantee).
-    const { assignments: optimized, leftover } = optimizeAssignmentForScore(courses, remaining, capacity, successAvoidLows);
+    const { assignments: optimized, leftover } = optimizeAssignmentForScore(courses, remaining, capacity, successAvoidLows, settings);
     Object.keys(assignments).forEach((cid) => {
       assignments[cid] = optimized[cid] || [];
     });
@@ -3058,11 +3065,31 @@ function TeacherResponsesGrid({ code }) {
   const rankColorMap = { 1: gold, 2: green, 3: clay };
   const rankSoftMap = { 1: goldSoft, 2: greenSoft, 3: claySoft };
 
+  // Which course each student was actually placed into, once an assignment has been
+  // run — independent of their ranked choices, so a backfilled placement (outside their
+  // top 3) still shows up shaded even though it has no "Choice N" badge.
+  const landedCourseByStudent = {};
+  if (group?.results) {
+    Object.entries(group.results.assignments || {}).forEach(([courseId, list]) => {
+      list.forEach((s) => {
+        landedCourseByStudent[s.id] = courseId;
+      });
+    });
+  }
+
   if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
 
   return (
     <div>
-      <Header eyebrow={group.name} title="Responses grid" sub="A read-only view of every response — students down the side, courses and questions across the top." />
+      <Header
+        eyebrow={group.name}
+        title="Responses grid"
+        sub={
+          group.results
+            ? "A read-only view of every response — students down the side, courses and questions across the top. The course each student landed in is shaded green."
+            : "A read-only view of every response — students down the side, courses and questions across the top. Run an assignment to see who landed where."
+        }
+      />
 
       {courses.length < 2 ? (
         <p style={{ fontSize: 13, color: inkSoft }}>This group doesn't have enough courses set up yet.</p>
@@ -3105,8 +3132,18 @@ function TeacherResponsesGrid({ code }) {
                   <td style={{ borderBottom: `1px solid ${line}`, padding: "8px 12px", fontFamily: mono, fontSize: 13, color: inkSoft }}>{r.grade}</td>
                   {courses.map((c) => {
                     const rank = r.assignments[c.id];
+                    const landed = landedCourseByStudent[r.studentId] === c.id;
                     return (
-                      <td key={c.id} style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: 8, textAlign: "center" }}>
+                      <td
+                        key={c.id}
+                        style={{
+                          borderBottom: `1px solid ${line}`,
+                          borderLeft: `1px solid ${line}`,
+                          padding: 8,
+                          textAlign: "center",
+                          background: landed ? greenSoft : "transparent",
+                        }}
+                      >
                         {rank && (
                           <span
                             style={{
@@ -3114,14 +3151,20 @@ function TeacherResponsesGrid({ code }) {
                               minWidth: 64,
                               padding: "5px 0",
                               borderRadius: 6,
-                              background: rankSoftMap[rank],
+                              background: landed ? "#fff" : rankSoftMap[rank],
                               color: rankColorMap[rank],
                               fontWeight: 700,
                               fontSize: 12,
                               fontFamily: mono,
+                              border: landed ? `1px solid ${green}55` : "none",
                             }}
                           >
                             Choice {rank}
+                          </span>
+                        )}
+                        {landed && !rank && (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: green, fontFamily: mono }}>
+                            <Check size={11} /> Placed
                           </span>
                         )}
                       </td>
@@ -5637,7 +5680,7 @@ function GroupEditor({ code }) {
                         title="Total success score — how well students' preferences were matched, weighted by grade"
                         style={{ fontFamily: mono, fontSize: 12, fontWeight: 700, color: green, background: greenSoft, padding: "5px 10px", borderRadius: 6, whiteSpace: "nowrap" }}
                       >
-                        Success score: {computeSuccessScore(students, result.assignments)}
+                        Success score: {computeSuccessScore(students, result.assignments, settings)}
                       </span>
                     )}
                     <IconBtn onClick={loadGroup}>
