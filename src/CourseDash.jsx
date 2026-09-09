@@ -117,7 +117,14 @@ async function storeList(prefix, shared) {
 // already active so existing groups don't suddenly lock students out.
 function normalizeGroup(g) {
   if (!g) return g;
-  return { ...g, courses: g.courses || g.clubs || [], status: g.status || "active", resultsFinalized: !!g.resultsFinalized, publishedAt: g.publishedAt || null };
+  return {
+    ...g,
+    courses: g.courses || g.clubs || [],
+    status: g.status || "active",
+    resultsFinalized: !!g.resultsFinalized,
+    publishedAt: g.publishedAt || null,
+    extraQuestions: g.extraQuestions || [],
+  };
 }
 
 // Backward-compat: a previous version of manual drag-to-reassign always stored
@@ -3881,6 +3888,9 @@ function GroupEditor({ code }) {
   const [chain, setChain] = useState(null);
   const [tab, setTab] = useState("courses");
   const [courses, setCourses] = useState([]);
+  const [extraQuestions, setExtraQuestions] = useState([]);
+  const [savingQuestions, setSavingQuestions] = useState(false);
+  const [expandedStudent, setExpandedStudent] = useState(null); // student id currently expanded in the Students list
   const [students, setStudents] = useState([]);
   const [result, setResult] = useState(null);
   const [priority, setPriority] = useState({});
@@ -3907,6 +3917,7 @@ function GroupEditor({ code }) {
     }
     setGroup(g);
     setCourses(g?.courses || []);
+    setExtraQuestions(g?.extraQuestions || []);
     const fixedResults = reconcileManualRanks(g?.results || null);
     setResult(fixedResults);
     if (g && fixedResults && fixedResults !== g.results) {
@@ -3970,12 +3981,23 @@ function GroupEditor({ code }) {
   const saveCourses = async (next) => {
     setCourses(next);
     setSavingCourses(true);
-    await storeSet(`group:${code}`, { ...group, courses: next }, true);
+    await storeSet(`group:${code}`, { ...group, courses: next, extraQuestions }, true);
     setSavingCourses(false);
   };
 
+  const saveQuestions = async (next) => {
+    setExtraQuestions(next);
+    setSavingQuestions(true);
+    await storeSet(`group:${code}`, { ...group, courses, extraQuestions: next }, true);
+    setSavingQuestions(false);
+  };
+  const addQuestion = () => saveQuestions([...extraQuestions, { id: genId(), text: "" }]);
+  const updateQuestionLocal = (id, patch) => setExtraQuestions(extraQuestions.map((q) => (q.id === id ? { ...q, ...patch } : q)));
+  const commitQuestion = () => saveQuestions(extraQuestions);
+  const removeQuestion = (id) => saveQuestions(extraQuestions.filter((q) => q.id !== id));
+
   const updateStatus = async (status) => {
-    const updated = { ...group, courses, status, publishedAt: status === "published" && !group.publishedAt ? Date.now() : group.publishedAt };
+    const updated = { ...group, courses, extraQuestions, status, publishedAt: status === "published" && !group.publishedAt ? Date.now() : group.publishedAt };
     setGroup(updated);
     await storeSet(`group:${code}`, updated, true);
   };
@@ -3984,7 +4006,7 @@ function GroupEditor({ code }) {
   const [finalizing, setFinalizing] = useState(false);
   const finalizeResults = async () => {
     setFinalizing(true);
-    const updated = { ...group, courses, resultsFinalized: true };
+    const updated = { ...group, courses, extraQuestions, resultsFinalized: true };
     setGroup(updated);
     await storeSet(`group:${code}`, updated, true);
     // Any pending switch requests for this group can no longer be acted on — clear them.
@@ -4025,7 +4047,7 @@ function GroupEditor({ code }) {
   const runAssignment = async () => {
     const res = assignStudents(courses, students, priority, settings);
     setResult(res);
-    await storeSet(`group:${code}`, { ...group, courses, results: res }, true);
+    await storeSet(`group:${code}`, { ...group, courses, extraQuestions, results: res }, true);
     setTab("results");
   };
 
@@ -4064,7 +4086,7 @@ function GroupEditor({ code }) {
     const nextResult = moveStudentInResults(result, studentId, fromCourseId, toCourseId);
     if (nextResult === result) return; // no-op: same course, or student not found
     setResult(nextResult);
-    await storeSet(`group:${code}`, { ...group, courses, results: nextResult }, true);
+    await storeSet(`group:${code}`, { ...group, courses, extraQuestions, results: nextResult }, true);
   };
 
   const rankColor = { 1: gold, 2: green, 3: clay };
@@ -4288,6 +4310,36 @@ function GroupEditor({ code }) {
                 </div>
               </div>
             )}
+
+            <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${line}` }}>
+              <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 700, marginBottom: 4 }}>Extra survey questions</div>
+              <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 12 }}>
+                Optional free-response questions shown to students under their course choices when they join. They don't affect placement.
+              </p>
+              <div style={{ display: "grid", gap: 10 }}>
+                {extraQuestions.map((q, i) => (
+                  <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "10px 12px" }}>
+                    <span style={{ fontFamily: mono, fontSize: 12, color: inkSoft }}>{i + 1}</span>
+                    <input
+                      value={q.text}
+                      onChange={(e) => updateQuestionLocal(q.id, { text: e.target.value })}
+                      onBlur={commitQuestion}
+                      placeholder="Question for students"
+                      style={{ flex: 1, border: "none", outline: "none", fontFamily: sans, fontSize: 13.5, background: "transparent", color: ink }}
+                    />
+                    <IconBtn tone="clay" onClick={() => removeQuestion(q.id)} title="Remove question">
+                      <X size={14} />
+                    </IconBtn>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
+                <IconBtn onClick={addQuestion} tone="green">
+                  <Plus size={14} /> Add question
+                </IconBtn>
+                {savingQuestions && <span style={{ fontSize: 12, color: inkSoft }}>Saving…</span>}
+              </div>
+            </div>
           </div>
         )}
 
@@ -4318,26 +4370,73 @@ function GroupEditor({ code }) {
                   const q = studentSearch.trim().toLowerCase();
                   return !q || s.name.toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
                 })
-                .map((s) => (
-                  <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
-                    <span style={{ flex: 1, minWidth: 0 }}>
-                      <span style={{ fontWeight: 600 }}>{s.name}</span>
-                      {s.email && (
-                        <span style={{ display: "block", fontSize: 11.5, color: inkSoft, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {s.email}
+                .map((s) => {
+                  const expanded = expandedStudent === s.id;
+                  return (
+                    <div key={s.id} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
+                      <div
+                        onClick={() => setExpandedStudent(expanded ? null : s.id)}
+                        style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}
+                      >
+                        <ChevronRight
+                          size={13}
+                          style={{ color: inkSoft, flexShrink: 0, transition: "transform 0.15s", transform: expanded ? "rotate(90deg)" : "none" }}
+                        />
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ fontWeight: 600 }}>{s.name}</span>
+                          {s.email && (
+                            <span style={{ display: "block", fontSize: 11.5, color: inkSoft, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {s.email}
+                            </span>
+                          )}
                         </span>
+                        <PriorityBadge scores={priority[s.id]} />
+                        <span style={{ fontFamily: mono, color: inkSoft, fontSize: 12 }}>Grade {s.grade}</span>
+                        <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>
+                          {s.prefs.map((p, i) => courses.find((c) => c.id === p)?.name || "—").join("  →  ")}
+                        </span>
+                        <IconBtn
+                          tone="clay"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeStudent(s.id);
+                          }}
+                          title="Remove response"
+                        >
+                          <X size={13} />
+                        </IconBtn>
+                      </div>
+                      {expanded && (
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${line}`, display: "grid", gap: 8 }}>
+                          <div style={{ fontSize: 12.5 }}>
+                            <strong>Grade:</strong> {s.grade}
+                          </div>
+                          <div style={{ fontSize: 12.5 }}>
+                            <strong>Ranked choices:</strong>
+                            <ol style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                              {s.prefs.map((p, i) => (
+                                <li key={i}>{courses.find((c) => c.id === p)?.name || "(removed course)"}</li>
+                              ))}
+                            </ol>
+                          </div>
+                          {extraQuestions.length > 0 && (
+                            <div style={{ fontSize: 12.5 }}>
+                              <strong>Extra questions:</strong>
+                              <div style={{ display: "grid", gap: 4, marginTop: 4 }}>
+                                {extraQuestions.map((q) => (
+                                  <div key={q.id}>
+                                    <span style={{ color: inkSoft }}>{q.text || "(untitled question)"}:</span>{" "}
+                                    {s.extraAnswers?.[q.id] ? s.extraAnswers[q.id] : <em style={{ color: inkSoft }}>No answer</em>}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       )}
-                    </span>
-                    <PriorityBadge scores={priority[s.id]} />
-                    <span style={{ fontFamily: mono, color: inkSoft, fontSize: 12 }}>Grade {s.grade}</span>
-                    <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>
-                      {s.prefs.map((p, i) => courses.find((c) => c.id === p)?.name || "—").join("  →  ")}
-                    </span>
-                    <IconBtn tone="clay" onClick={() => removeStudent(s.id)} title="Remove response">
-                      <X size={13} />
-                    </IconBtn>
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               {students.length === 0 && <p style={{ color: inkSoft, fontSize: 13 }}>No responses yet.</p>}
               {students.length > 0 &&
                 studentSearch.trim() &&
@@ -5217,6 +5316,7 @@ function StudentSurvey({ code, user, onDone }) {
   const [group, setGroup] = useState(null);
   const [grade, setGrade] = useState("");
   const [prefs, setPrefs] = useState(["", "", ""]);
+  const [extraAnswers, setExtraAnswers] = useState({}); // questionId -> answer text
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [isEdit, setIsEdit] = useState(false);
@@ -5230,6 +5330,7 @@ function StudentSurvey({ code, user, onDone }) {
         setIsEdit(true);
         setGrade(String(existing.grade));
         setPrefs([...existing.prefs, "", ""].slice(0, 3));
+        setExtraAnswers(existing.extraAnswers || {});
       }
     })();
   }, [code, user.email]);
@@ -5241,6 +5342,7 @@ function StudentSurvey({ code, user, onDone }) {
     next[i] = v;
     setPrefs(next);
   };
+  const setExtraAnswer = (questionId, v) => setExtraAnswers((prev) => ({ ...prev, [questionId]: v }));
 
   const submit = async () => {
     setError("");
@@ -5251,7 +5353,11 @@ function StudentSurvey({ code, user, onDone }) {
     if (new Set(chosen).size < choiceCount) return setError(`Choose ${choiceCount} different courses.`);
     setBusy(true);
     const key = `submission:${code}:${safeKey(user.email)}`;
-    await storeSet(key, { id: safeKey(user.email), name: user.name, email: user.email, grade: Number(grade), prefs: chosen }, true);
+    await storeSet(
+      key,
+      { id: safeKey(user.email), name: user.name, email: user.email, grade: Number(grade), prefs: chosen, extraAnswers },
+      true
+    );
     // Track which groups this student has responded to, so their "Active Groups"
     // tab can find these without scanning every group in storage.
     const indexKey = `student-groups:${safeKey(user.email)}`;
@@ -5284,6 +5390,16 @@ function StudentSurvey({ code, user, onDone }) {
                 </option>
               ))}
             </select>
+          </Field>
+        ))}
+        {(group.extraQuestions || []).map((q) => (
+          <Field key={q.id} label={q.text || "Question"}>
+            <input
+              style={inputStyle}
+              value={extraAnswers[q.id] || ""}
+              onChange={(e) => setExtraAnswer(q.id, e.target.value)}
+              placeholder="Your answer"
+            />
           </Field>
         ))}
         {error && (
