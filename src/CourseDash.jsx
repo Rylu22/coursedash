@@ -2286,8 +2286,14 @@ function QuickFillGrid({ code }) {
   const [allTestStudents, setAllTestStudents] = useState([]);
   const [showAddPicker, setShowAddPicker] = useState(false);
   const [creatingStudent, setCreatingStudent] = useState(false);
-  const [draggingRank, setDraggingRank] = useState(null);
+  // { rank, origin: {studentId, courseId} | null } while a box is being dragged —
+  // origin is set when the drag started from an already-placed box on the grid
+  // (so its old cell gets cleared on drop), and null when dragged from the corner palette.
+  const [dragPayload, setDragPayload] = useState(null);
   const [dragOverCell, setDragOverCell] = useState(null); // `${studentId}:${courseId}`
+  // Click-to-place mode: while a rank is selected here, clicking any cell places
+  // it there (selection stays active so several cells can be filled in a row).
+  const [selectedRank, setSelectedRank] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitMessage, setSubmitMessage] = useState("");
   const [loading, setLoading] = useState(true);
@@ -2349,18 +2355,29 @@ function QuickFillGrid({ code }) {
   const removeRow = (studentId) => setRows((prev) => prev.filter((r) => r.studentId !== studentId));
   const setGradeFor = (studentId, v) => setRows((prev) => prev.map((r) => (r.studentId === studentId ? { ...r, grade: v } : r)));
 
-  // Dropping rank N onto a cell: that rank moves here from wherever it was in this
-  // row, and whatever rank previously occupied this cell is cleared — a row can
-  // never end up with a rank used twice or a cell holding two ranks.
-  const placeChoice = (studentId, courseId, rank) => {
+  // Places `rank` at `target` ({studentId, courseId}). If `origin` is given (the box
+  // was dragged off an already-filled cell rather than the corner palette) and it's
+  // in a different row than the target, that origin cell is cleared too — so a box
+  // can be dragged anywhere on the grid and it simply moves rather than duplicates.
+  // Within the target row, whatever previously held this rank is removed (a rank
+  // appears at most once per row) and whatever previously sat in the target cell is
+  // overwritten — matching "the same choice on that row is removed and replaced."
+  const moveChoice = (rank, origin, target) => {
     setRows((prev) =>
       prev.map((r) => {
-        if (r.studentId !== studentId) return r;
+        if (origin && r.studentId === origin.studentId && r.studentId !== target.studentId) {
+          if (r.assignments[origin.courseId] !== rank) return r;
+          const next = { ...r.assignments };
+          delete next[origin.courseId];
+          return { ...r, assignments: next };
+        }
+        if (r.studentId !== target.studentId) return r;
         const next = {};
         Object.entries(r.assignments).forEach(([cid, rk]) => {
-          if (rk !== rank && cid !== courseId) next[cid] = rk;
+          if (rk === rank || cid === target.courseId) return;
+          next[cid] = rk;
         });
-        next[courseId] = rank;
+        next[target.courseId] = rank;
         return { ...r, assignments: next };
       })
     );
@@ -2412,11 +2429,11 @@ function QuickFillGrid({ code }) {
   if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
 
   return (
-    <div>
+    <div style={{ paddingBottom: 130 }}>
       <Header
         eyebrow={group.name}
         title="Quick fill test responses"
-        sub="Drag a Choice box onto a cell to set that student's ranked pick for a course. A row must be completely filled or completely empty before submitting."
+        sub="Drag a Choice box from the corner panel (or an already-placed box) onto a cell, or click a box then click cells to fill them. A row must be completely filled or completely empty before submitting."
       />
 
       {courses.length < 2 ? (
@@ -2472,28 +2489,38 @@ function QuickFillGrid({ code }) {
                             key={c.id}
                             onDragOver={(e) => {
                               e.preventDefault();
-                              if (draggingRank) setDragOverCell(cellKey);
+                              if (dragPayload) setDragOverCell(cellKey);
                             }}
                             onDragLeave={() => setDragOverCell((id) => (id === cellKey ? null : id))}
                             onDrop={(e) => {
                               e.preventDefault();
-                              if (draggingRank) placeChoice(r.studentId, c.id, draggingRank);
+                              if (dragPayload) moveChoice(dragPayload.rank, dragPayload.origin, { studentId: r.studentId, courseId: c.id });
+                              setDragPayload(null);
                               setDragOverCell(null);
                             }}
-                            onClick={() => rank && clearCell(r.studentId, c.id)}
-                            title={rank ? "Click to clear" : undefined}
+                            onClick={() => {
+                              if (selectedRank != null) moveChoice(selectedRank, null, { studentId: r.studentId, courseId: c.id });
+                              else if (rank) clearCell(r.studentId, c.id);
+                            }}
+                            title={selectedRank != null ? "Click to place the selected choice" : rank ? "Click to clear, or drag to move" : undefined}
                             style={{
                               borderBottom: `1px solid ${line}`,
                               borderLeft: `1px solid ${line}`,
                               padding: 8,
                               textAlign: "center",
                               background: isOver ? goldSoft : "transparent",
-                              cursor: rank ? "pointer" : "default",
+                              cursor: selectedRank != null || rank ? "pointer" : "default",
                               transition: "background .1s",
                             }}
                           >
                             {rank && (
                               <span
+                                draggable
+                                onDragStart={() => setDragPayload({ rank, origin: { studentId: r.studentId, courseId: c.id } })}
+                                onDragEnd={() => {
+                                  setDragPayload(null);
+                                  setDragOverCell(null);
+                                }}
                                 style={{
                                   display: "inline-block",
                                   minWidth: 64,
@@ -2504,6 +2531,7 @@ function QuickFillGrid({ code }) {
                                   fontWeight: 700,
                                   fontSize: 12,
                                   fontFamily: mono,
+                                  cursor: "grab",
                                 }}
                               >
                                 Choice {rank}
@@ -2570,45 +2598,6 @@ function QuickFillGrid({ code }) {
             )}
           </div>
 
-          <div style={{ marginTop: 26, borderTop: `1px solid ${line}`, paddingTop: 18 }}>
-            <p style={{ fontSize: 12, color: inkSoft, marginBottom: 14, display: "flex", alignItems: "center", gap: 5 }}>
-              <GripVertical size={13} /> Drag a box onto a cell to set that student's choice for that course. Click a filled cell to clear it.
-            </p>
-            <div style={{ display: "flex", gap: 22 }}>
-              {Array.from({ length: choiceCount }, (_, i) => i + 1).map((rank) => (
-                <div key={rank} style={{ position: "relative", width: 90, height: 40 }}>
-                  <div style={{ position: "absolute", inset: 0, top: 6, left: 6, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
-                  <div style={{ position: "absolute", inset: 0, top: 3, left: 3, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
-                  <div
-                    draggable
-                    onDragStart={() => setDraggingRank(rank)}
-                    onDragEnd={() => {
-                      setDraggingRank(null);
-                      setDragOverCell(null);
-                    }}
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      borderRadius: 8,
-                      border: `1px solid ${rankColorMap[rank]}55`,
-                      background: rankSoftMap[rank],
-                      color: rankColorMap[rank],
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontFamily: mono,
-                      fontWeight: 700,
-                      fontSize: 12.5,
-                      cursor: "grab",
-                    }}
-                  >
-                    Choice {rank}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
           <div style={{ marginTop: 22, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <Btn onClick={submit} disabled={!canSubmit || submitting}>
               {submitting ? "Submitting…" : "Submit Responses"}
@@ -2623,6 +2612,66 @@ function QuickFillGrid({ code }) {
                 <Check size={13} /> {submitMessage}
               </span>
             )}
+          </div>
+
+          {/* Fixed to the viewport (not the page) so it's always on screen, however
+              far the grid is scrolled. */}
+          <div
+            style={{
+              position: "fixed",
+              left: 20,
+              bottom: 20,
+              zIndex: 40,
+              background: "#fff",
+              border: `1px solid ${line}`,
+              borderRadius: 10,
+              padding: "12px 14px",
+              boxShadow: "0 6px 20px rgba(19,34,56,0.18)",
+            }}
+          >
+            <p style={{ fontSize: 11, color: inkSoft, margin: "0 0 10px", display: "flex", alignItems: "flex-start", gap: 5, maxWidth: 250 }}>
+              <GripVertical size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+              Drag a box onto the grid, or click one then click cells to fill them.
+            </p>
+            <div style={{ display: "flex", gap: 16 }}>
+              {Array.from({ length: choiceCount }, (_, i) => i + 1).map((rank) => {
+                const selected = selectedRank === rank;
+                return (
+                  <div key={rank} style={{ position: "relative", width: 82, height: 38 }}>
+                    <div style={{ position: "absolute", inset: 0, top: 6, left: 6, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
+                    <div style={{ position: "absolute", inset: 0, top: 3, left: 3, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
+                    <div
+                      draggable
+                      onDragStart={() => setDragPayload({ rank, origin: null })}
+                      onDragEnd={() => {
+                        setDragPayload(null);
+                        setDragOverCell(null);
+                      }}
+                      onClick={() => setSelectedRank((prev) => (prev === rank ? null : rank))}
+                      title={selected ? "Selected — click cells to fill them, or click again to deselect" : "Click to select, or drag onto a cell"}
+                      style={{
+                        position: "absolute",
+                        inset: 0,
+                        borderRadius: 8,
+                        border: `1px solid ${rankColorMap[rank]}55`,
+                        boxShadow: selected ? `0 0 0 2px ${green}` : "none",
+                        background: rankSoftMap[rank],
+                        color: rankColorMap[rank],
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontFamily: mono,
+                        fontWeight: 700,
+                        fontSize: 12.5,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Choice {rank}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </>
       )}
