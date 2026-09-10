@@ -395,6 +395,13 @@ function gradeDirectionLabel(settings) {
   if (settings.gradeDirection === "custom") return "custom order";
   return `${settings.gradeDirection} grade first`;
 }
+// Key-order-independent equality check for two settings objects — used to detect whether
+// the Logic tab has changed since a result's settings snapshot was taken, without false
+// positives from object keys simply having been inserted in a different order.
+function settingsEqual(a, b) {
+  const stable = (obj) => JSON.stringify(obj, Object.keys(obj || {}).sort());
+  return stable(a) === stable(b);
+}
 function successScoreFor(student, courseId, gradeScoreFn) {
   const rank = (student.prefs || []).indexOf(courseId) + 1; // 0 when courseId isn't a ranked choice
   if (rank < 1 || rank > 3) return 0;
@@ -5249,11 +5256,18 @@ function GroupEditor({ code }) {
 
   const canRun = courses.length >= 2 && courses.every((c) => c.name.trim()) && students.length > 0;
   const runAssignment = async () => {
-    const res = assignStudents(courses, students, priority, settings);
+    // Snapshot the Logic settings that actually produced this placement. Editing the
+    // Logic tab afterward (e.g. dragging grades into a new custom order) doesn't move
+    // anyone by itself — only "Run assignment" does — so scoring and explanations must
+    // keep using the settings from this run, not whatever the tab shows later, or the
+    // numbers stop matching the placement they're supposedly describing.
+    const res = { ...assignStudents(courses, students, priority, settings), settingsSnapshot: settings };
     setResult(res);
     await storeSet(`group:${code}`, { ...group, courses, extraQuestions, results: res }, true);
     setTab("results");
   };
+  // Falls back to the live settings for a result saved before this snapshot existed.
+  const runSettings = result?.settingsSnapshot || settings;
 
   const exportCSV = () => {
     if (!result) return;
@@ -5875,7 +5889,11 @@ function GroupEditor({ code }) {
                     {settings.useSuccessScore && (
                       <button
                         onClick={() => setShowScoreBreakdown(true)}
-                        title="Click for a breakdown of how many points each grade contributed"
+                        title={
+                          !settingsEqual(runSettings, settings)
+                            ? "Based on the settings from your last run, not the Logic tab's current settings — click for details"
+                            : "Click for a breakdown of how many points each grade contributed"
+                        }
                         style={{
                           fontFamily: mono,
                           fontSize: 12,
@@ -5889,7 +5907,7 @@ function GroupEditor({ code }) {
                           cursor: "pointer",
                         }}
                       >
-                        Success score: {computeSuccessScore(students, result.assignments, settings)}
+                        Success score: {computeSuccessScore(students, result.assignments, runSettings)}
                       </button>
                     )}
                     <IconBtn onClick={loadGroup}>
@@ -6069,7 +6087,7 @@ function GroupEditor({ code }) {
               courses,
               allStudents: students,
               priority,
-              settings,
+              settings: runSettings,
               capacity: result?.capacity || {},
             });
             const s = explainFor.student;
@@ -6099,7 +6117,7 @@ function GroupEditor({ code }) {
                     </div>
                   ) : !info.course ? (
                     <div>No open seats were found for them anywhere during backfill after all rounds ran.</div>
-                  ) : settings.usePreference === false ? (
+                  ) : runSettings.usePreference === false ? (
                     <div>
                       Preference order was turned off for this run, so students were pooled and placed into whichever
                       open course needed students most — this course wasn't necessarily one of their choices.
@@ -6124,11 +6142,11 @@ function GroupEditor({ code }) {
                     <div style={{ borderTop: `1px solid ${line}`, paddingTop: 10 }}>
                       <div style={{ fontWeight: 700, marginBottom: 4 }}>Tie-break logic active this run</div>
                       <div style={{ color: inkSoft, fontSize: 12.5 }}>
-                        Grade priority: {settings.useGrade ? `on (${gradeDirectionLabel(settings)})` : "off"} — this student is grade {s.grade}
+                        Grade priority: {runSettings.useGrade ? `on (${gradeDirectionLabel(runSettings)})` : "off"} — this student is grade {s.grade}
                         <br />
-                        History priority: {settings.useHistory ? `on (${settings.historyMode})` : "off"}
-                        {settings.useHistory && info.course ? ` — worth +${info.historyScore} for this course` : ""}
-                        {settings.useGrade && settings.useHistory && <><br />Order: {settings.order[0]} decided ties before {settings.order[1]}</>}
+                        History priority: {runSettings.useHistory ? `on (${runSettings.historyMode})` : "off"}
+                        {runSettings.useHistory && info.course ? ` — worth +${info.historyScore} for this course` : ""}
+                        {runSettings.useGrade && runSettings.useHistory && <><br />Order: {runSettings.order[0]} decided ties before {runSettings.order[1]}</>}
                       </div>
                     </div>
                   )}
@@ -6151,12 +6169,19 @@ function GroupEditor({ code }) {
           style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
         >
           {(() => {
-            const breakdown = computeSuccessScoreBreakdown(students, result.assignments, settings);
+            const breakdown = computeSuccessScoreBreakdown(students, result.assignments, runSettings);
             const total = breakdown.reduce((sum, b) => sum + b.points, 0);
+            const stale = !settingsEqual(runSettings, settings);
             return (
               <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 380, maxWidth: "100%" }}>
                 <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: inkSoft, textTransform: "uppercase" }}>Success score breakdown</div>
                 <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 14px" }}>Total: {total} point{total === 1 ? "" : "s"}</h3>
+                {stale && (
+                  <p style={{ fontSize: 11.5, color: gold, background: goldSoft, borderRadius: 7, padding: "8px 10px", margin: "0 0 12px" }}>
+                    The Logic tab has changed since this was run — this reflects the grade priority, preference, and history settings active
+                    when you last clicked "Run assignment," not what's shown there now. Run it again to apply the new settings.
+                  </p>
+                )}
                 <div style={{ display: "grid", gap: 6 }}>
                   {breakdown.map((b) => (
                     <div
