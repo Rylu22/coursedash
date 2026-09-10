@@ -415,6 +415,20 @@ function computeSuccessScore(students, assignments, settings = {}) {
   });
   return total;
 }
+// Same total, split out by grade level — lets a teacher see which grades' matches are
+// actually driving the number shown for computeSuccessScore.
+function computeSuccessScoreBreakdown(students, assignments, settings = {}) {
+  const gradeScoreFn = buildGradeScoreFn(students, settings);
+  const byGrade = {};
+  Object.entries(assignments).forEach(([courseId, list]) => {
+    list.forEach((s) => {
+      if (!byGrade[s.grade]) byGrade[s.grade] = { grade: s.grade, points: 0, students: 0 };
+      byGrade[s.grade].points += successScoreFor(s, courseId, gradeScoreFn);
+      byGrade[s.grade].students += 1;
+    });
+  });
+  return Object.values(byGrade).sort((a, b) => b.points - a.points || a.grade - b.grade);
+}
 
 // Generic min-cost max-flow via SPFA-based successive shortest augmenting paths (handles
 // negative edge costs, which we need since maximizing score = minimizing negative score;
@@ -5061,6 +5075,7 @@ function GroupEditor({ code }) {
   const [dragStudent, setDragStudent] = useState(null); // { studentId, fromCourseId } — fromCourseId null = from Unassigned
   const [dragOverId, setDragOverId] = useState(null); // course id, or "unassigned", currently hovered
   const [explainFor, setExplainFor] = useState(null); // { student, courseId }
+  const [showScoreBreakdown, setShowScoreBreakdown] = useState(false);
 
   const loadGroup = useCallback(async () => {
     let g = normalizeGroup(await storeGet(`group:${code}`, true));
@@ -5858,12 +5873,24 @@ function GroupEditor({ code }) {
                   </p>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     {settings.useSuccessScore && (
-                      <span
-                        title="Total success score — how well students' preferences were matched, weighted by grade"
-                        style={{ fontFamily: mono, fontSize: 12, fontWeight: 700, color: green, background: greenSoft, padding: "5px 10px", borderRadius: 6, whiteSpace: "nowrap" }}
+                      <button
+                        onClick={() => setShowScoreBreakdown(true)}
+                        title="Click for a breakdown of how many points each grade contributed"
+                        style={{
+                          fontFamily: mono,
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: green,
+                          background: greenSoft,
+                          padding: "5px 10px",
+                          borderRadius: 6,
+                          whiteSpace: "nowrap",
+                          border: "none",
+                          cursor: "pointer",
+                        }}
                       >
                         Success score: {computeSuccessScore(students, result.assignments, settings)}
-                      </span>
+                      </button>
                     )}
                     <IconBtn onClick={loadGroup}>
                       <RefreshCw size={14} /> Refresh
@@ -6109,6 +6136,55 @@ function GroupEditor({ code }) {
 
                 <div style={{ marginTop: 16 }}>
                   <Btn tone="ghost" onClick={() => setExplainFor(null)}>
+                    Close
+                  </Btn>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {showScoreBreakdown && result && (
+        <div
+          onClick={() => setShowScoreBreakdown(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+        >
+          {(() => {
+            const breakdown = computeSuccessScoreBreakdown(students, result.assignments, settings);
+            const total = breakdown.reduce((sum, b) => sum + b.points, 0);
+            return (
+              <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 380, maxWidth: "100%" }}>
+                <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: inkSoft, textTransform: "uppercase" }}>Success score breakdown</div>
+                <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 14px" }}>Total: {total} point{total === 1 ? "" : "s"}</h3>
+                <div style={{ display: "grid", gap: 6 }}>
+                  {breakdown.map((b) => (
+                    <div
+                      key={b.grade}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "auto 1fr auto",
+                        alignItems: "center",
+                        gap: 10,
+                        padding: "8px 10px",
+                        borderRadius: 7,
+                        background: greenSoft,
+                      }}
+                    >
+                      <span style={{ fontSize: 13, fontWeight: 700 }}>Grade {b.grade}</span>
+                      <span style={{ fontSize: 11.5, color: inkSoft }}>
+                        {b.students} student{b.students === 1 ? "" : "s"}
+                      </span>
+                      <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, color: green, whiteSpace: "nowrap" }}>
+                        {b.points} pt{b.points === 1 ? "" : "s"}
+                        {total > 0 ? ` (${Math.round((b.points / total) * 100)}%)` : ""}
+                      </span>
+                    </div>
+                  ))}
+                  {breakdown.length === 0 && <p style={{ fontSize: 12.5, color: inkSoft, margin: 0 }}>No scored placements yet.</p>}
+                </div>
+                <div style={{ marginTop: 16 }}>
+                  <Btn tone="ghost" onClick={() => setShowScoreBreakdown(false)}>
                     Close
                   </Btn>
                 </div>
