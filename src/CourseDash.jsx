@@ -2944,17 +2944,146 @@ function QuickFillGrid({ code }) {
   if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
 
   return (
-    <div style={{ paddingBottom: 130 }}>
+    <div>
       <Header
         eyebrow={group.name}
         title="Quick fill test responses"
-        sub="Drag a Choice box from the corner panel (or an already-placed box) onto a cell, or click a box then click cells to fill them. A row must be completely filled or completely empty before submitting."
+        sub="Drag a Choice box from the sidebar (or an already-placed box) onto a cell, or click a box then click cells to fill them. A row must be completely filled or completely empty before submitting."
       />
 
       {courses.length < 2 ? (
         <p style={{ fontSize: 13, color: clay }}>This group needs at least 2 courses before responses can be filled in.</p>
       ) : (
-        <>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 20 }}>
+          {/* Sticky sidebar — scrolls with the page until it hits the top, then stays
+              put, but never overlaps the grid the way a fixed corner panel would. */}
+          <div
+            style={{
+              width: 200,
+              flexShrink: 0,
+              position: "sticky",
+              top: 20,
+              background: "#fff",
+              border: `1px solid ${line}`,
+              borderRadius: 10,
+              padding: "14px 12px",
+              display: "grid",
+              gap: 14,
+            }}
+          >
+            <div>
+              <p style={{ fontSize: 11, color: inkSoft, margin: "0 0 10px", display: "flex", alignItems: "flex-start", gap: 5 }}>
+                <GripVertical size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                Drag a box onto the grid, or click one then click cells to fill them.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {Array.from({ length: choiceCount }, (_, i) => i + 1).map((rank) => {
+                  const selected = selectedRank === rank;
+                  return (
+                    <div key={rank} style={{ position: "relative", width: 82, height: 38 }}>
+                      <div style={{ position: "absolute", inset: 0, top: 6, left: 6, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
+                      <div style={{ position: "absolute", inset: 0, top: 3, left: 3, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
+                      <div
+                        draggable
+                        onDragStart={() => setDragPayload({ rank, origin: null })}
+                        onDragEnd={() => {
+                          setDragPayload(null);
+                          setDragOverCell(null);
+                        }}
+                        onClick={() => setSelectedRank((prev) => (prev === rank ? null : rank))}
+                        title={selected ? "Selected — click cells to fill them, or click again to deselect" : "Click to select, or drag onto a cell"}
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          borderRadius: 8,
+                          border: `1px solid ${rankColorMap[rank]}55`,
+                          boxShadow: selected ? `0 0 0 2px ${green}` : "none",
+                          background: rankSoftMap[rank],
+                          color: rankColorMap[rank],
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontFamily: mono,
+                          fontWeight: 700,
+                          fontSize: 12.5,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Choice {rank}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, display: "flex", gap: 8 }}>
+              <IconBtn title="Undo" onClick={undo} disabled={undoStack.length === 0}>
+                <Undo2 size={14} />
+              </IconBtn>
+              <IconBtn title="Redo" onClick={redo} disabled={redoStack.length === 0}>
+                <Redo2 size={14} />
+              </IconBtn>
+            </div>
+
+            <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, position: "relative" }}>
+              <Btn tone="ghost" onClick={() => setShowAddPicker((o) => !o)} full>
+                <Plus size={14} /> Add test student
+              </Btn>
+              {showAddPicker && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "100%",
+                    left: 0,
+                    right: 0,
+                    marginTop: 6,
+                    zIndex: 20,
+                    background: "#fff",
+                    border: `1px solid ${line}`,
+                    borderRadius: 8,
+                    padding: 10,
+                    boxShadow: "0 4px 14px rgba(19,34,56,0.12)",
+                  }}
+                >
+                  <Btn onClick={addNewStudent} disabled={creatingStudent} full>
+                    <Plus size={13} /> {creatingStudent ? "Creating…" : "New test student"}
+                  </Btn>
+                  {availableStudents.length > 0 && (
+                    <div style={{ marginTop: 8, display: "grid", gap: 2, maxHeight: 220, overflowY: "auto" }}>
+                      {availableStudents.map((u) => (
+                        <button
+                          key={u.email}
+                          onClick={() => addStudentRow(u)}
+                          style={{ textAlign: "left", background: "none", border: "none", padding: "6px 6px", fontSize: 13, fontFamily: sans, cursor: "pointer", borderRadius: 5, color: ink }}
+                        >
+                          {u.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, display: "grid", gap: 8 }}>
+              <Btn onClick={submit} disabled={!canSubmit || submitting} full>
+                {submitting ? "Submitting…" : "Submit Responses"}
+              </Btn>
+              {rows.some((r) => rowStatus(r) === "partial") && (
+                <span style={{ fontSize: 11.5, color: clay, display: "flex", alignItems: "flex-start", gap: 5 }}>
+                  <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} /> Every row needs to be completely filled or completely empty before submitting.
+                </span>
+              )}
+              {submitMessage && (
+                <span style={{ fontSize: 12, color: green, display: "flex", alignItems: "flex-start", gap: 5 }}>
+                  <Check size={13} style={{ flexShrink: 0, marginTop: 1 }} /> {submitMessage}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ overflowX: "auto", background: "#fff", border: `1px solid ${line}`, borderRadius: 10 }}>
             <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 380 + courses.length * 110 + extraQuestions.length * 160 }}>
               <thead>
@@ -3085,138 +3214,15 @@ function QuickFillGrid({ code }) {
                 {rows.length === 0 && (
                   <tr>
                     <td colSpan={courses.length + extraQuestions.length + 3} style={{ padding: "18px 12px", color: inkSoft, fontSize: 13 }}>
-                      No students added yet — use "Add test student" below.
+                      No students added yet — use "Add test student" in the sidebar.
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
-
-          <div style={{ marginTop: 14, position: "relative" }}>
-            <Btn tone="ghost" onClick={() => setShowAddPicker((o) => !o)}>
-              <Plus size={14} /> Add test student
-            </Btn>
-            {showAddPicker && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: "110%",
-                  left: 0,
-                  zIndex: 20,
-                  background: "#fff",
-                  border: `1px solid ${line}`,
-                  borderRadius: 8,
-                  padding: 10,
-                  minWidth: 220,
-                  boxShadow: "0 4px 14px rgba(19,34,56,0.12)",
-                }}
-              >
-                <Btn onClick={addNewStudent} disabled={creatingStudent} full>
-                  <Plus size={13} /> {creatingStudent ? "Creating…" : "New test student"}
-                </Btn>
-                {availableStudents.length > 0 && (
-                  <div style={{ marginTop: 8, display: "grid", gap: 2, maxHeight: 220, overflowY: "auto" }}>
-                    {availableStudents.map((u) => (
-                      <button
-                        key={u.email}
-                        onClick={() => addStudentRow(u)}
-                        style={{ textAlign: "left", background: "none", border: "none", padding: "6px 6px", fontSize: 13, fontFamily: sans, cursor: "pointer", borderRadius: 5, color: ink }}
-                      >
-                        {u.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
-
-          <div style={{ marginTop: 22, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <Btn onClick={submit} disabled={!canSubmit || submitting}>
-              {submitting ? "Submitting…" : "Submit Responses"}
-            </Btn>
-            {rows.some((r) => rowStatus(r) === "partial") && (
-              <span style={{ fontSize: 12, color: clay, display: "flex", alignItems: "center", gap: 5 }}>
-                <AlertTriangle size={12} /> Every row needs to be completely filled or completely empty before submitting.
-              </span>
-            )}
-            {submitMessage && (
-              <span style={{ fontSize: 12.5, color: green, display: "flex", alignItems: "center", gap: 5 }}>
-                <Check size={13} /> {submitMessage}
-              </span>
-            )}
-          </div>
-
-          {/* Fixed to the viewport (not the page) so it's always on screen, however
-              far the grid is scrolled. */}
-          <div
-            style={{
-              position: "fixed",
-              left: 20,
-              bottom: 20,
-              zIndex: 40,
-              background: "#fff",
-              border: `1px solid ${line}`,
-              borderRadius: 10,
-              padding: "12px 14px",
-              boxShadow: "0 6px 20px rgba(19,34,56,0.18)",
-            }}
-          >
-            <p style={{ fontSize: 11, color: inkSoft, margin: "0 0 10px", display: "flex", alignItems: "flex-start", gap: 5, maxWidth: 250 }}>
-              <GripVertical size={12} style={{ flexShrink: 0, marginTop: 1 }} />
-              Drag a box onto the grid, or click one then click cells to fill them.
-            </p>
-            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-              {Array.from({ length: choiceCount }, (_, i) => i + 1).map((rank) => {
-                const selected = selectedRank === rank;
-                return (
-                  <div key={rank} style={{ position: "relative", width: 82, height: 38 }}>
-                    <div style={{ position: "absolute", inset: 0, top: 6, left: 6, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
-                    <div style={{ position: "absolute", inset: 0, top: 3, left: 3, borderRadius: 8, border: `1px solid ${line}`, background: "#fff" }} />
-                    <div
-                      draggable
-                      onDragStart={() => setDragPayload({ rank, origin: null })}
-                      onDragEnd={() => {
-                        setDragPayload(null);
-                        setDragOverCell(null);
-                      }}
-                      onClick={() => setSelectedRank((prev) => (prev === rank ? null : rank))}
-                      title={selected ? "Selected — click cells to fill them, or click again to deselect" : "Click to select, or drag onto a cell"}
-                      style={{
-                        position: "absolute",
-                        inset: 0,
-                        borderRadius: 8,
-                        border: `1px solid ${rankColorMap[rank]}55`,
-                        boxShadow: selected ? `0 0 0 2px ${green}` : "none",
-                        background: rankSoftMap[rank],
-                        color: rankColorMap[rank],
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontFamily: mono,
-                        fontWeight: 700,
-                        fontSize: 12.5,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Choice {rank}
-                    </div>
-                  </div>
-                );
-              })}
-              <div style={{ width: 1, alignSelf: "stretch", background: line, margin: "6px 2px" }} />
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <IconBtn title="Undo" onClick={undo} disabled={undoStack.length === 0}>
-                  <Undo2 size={14} />
-                </IconBtn>
-                <IconBtn title="Redo" onClick={redo} disabled={redoStack.length === 0}>
-                  <Redo2 size={14} />
-                </IconBtn>
-              </div>
-            </div>
-          </div>
-        </>
+        </div>
       )}
     </div>
   );
