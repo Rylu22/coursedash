@@ -958,7 +958,13 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
     <div
       key={g}
       draggable
-      onDragStart={() => setDragGrade(g)}
+      onDragStart={(e) => {
+        setDragGrade(g);
+        // Firefox/Safari won't complete a drag without data set on it, even though we
+        // actually read the payload back out of React state, not dataTransfer.
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(g));
+      }}
       onDragEnd={() => setDragGrade(null)}
       style={{
         padding: "5px 10px",
@@ -984,9 +990,10 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
       }}
       onDrop={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         if (dragGrade !== null) moveGrade(dragGrade, { type: "gap", index });
       }}
-      style={{ height: dragGrade !== null ? 12 : 4 }}
+      style={{ height: dragGrade !== null ? 14 : 6 }}
     />
   );
 
@@ -1018,7 +1025,24 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
           {unplaced.map(chip)}
         </div>
       )}
-      <div>
+      {/* Catches any drop that lands in this section but misses a specific tier/gap
+          target underneath it (the specific ones stopPropagation so this only fires as
+          a fallback) — treats it as "add to the end" so the whole area is droppable,
+          not just the thin gap strips. */}
+      <div
+        onDragOver={(e) => {
+          if (dragGrade !== null) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          if (dragGrade !== null) moveGrade(dragGrade, { type: "gap", index: safeTiers.length });
+        }}
+        style={
+          safeTiers.length === 0
+            ? { border: `1px dashed ${line}`, borderRadius: 8, padding: 16, textAlign: "center" }
+            : undefined
+        }
+      >
         {gap(0)}
         {safeTiers.map((tier, i) => (
           <React.Fragment key={i}>
@@ -1028,6 +1052,7 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
               }}
               onDrop={(e) => {
                 e.preventDefault();
+                e.stopPropagation();
                 if (dragGrade !== null) moveGrade(dragGrade, { type: "tier", index: i });
               }}
               style={{
@@ -1051,7 +1076,7 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
           </React.Fragment>
         ))}
         {safeTiers.length === 0 && (
-          <p style={{ fontSize: 11.5, color: inkSoft, margin: "4px 0 0" }}>Drag a grade down here to start ordering.</p>
+          <span style={{ fontSize: 11.5, color: inkSoft }}>Drag a grade here to start ordering.</span>
         )}
       </div>
     </div>
