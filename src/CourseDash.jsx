@@ -287,7 +287,8 @@ const DEFAULT_LOGIC_SETTINGS = {
   useGrade: true,
   usePreference: true,
   useHistory: true,
-  gradeDirection: "higher", // "higher" | "lower"
+  gradeDirection: "higher", // "higher" | "lower" | "custom"
+  customGradeOrder: [], // "custom" mode only: [[gradeA, gradeB], [gradeC], ...] most-favored tier first
   order: ["history", "grade"], // tie-break priority order
   historyMode: "boost", // "boost" | "sameCourse" | "differentCourse" | "smartWeight"
   allowRequests: true,
@@ -361,14 +362,38 @@ function computeDemandWeight(courses, students) {
 // This mirrors the Grade priority setting rather than always favoring higher grades:
 // with Grade priority off, grade doesn't factor in at all — every student scores a
 // flat 3/2/1. With it on and set to "lower grade first," the ranking flips so the
-// lowest grade earns the highest score instead of the highest grade.
-function buildGradeScoreFn(students, settings = {}) {
-  if (settings.useGrade === false) return () => 3;
+// lowest grade earns the highest score instead of the highest grade. With "custom",
+// it follows the teacher's hand-arranged tiers instead of a simple high/low sort.
+//
+// Maps a grade level to a priority value — higher value = more favored. Shared by the
+// round-based assignment ordering and the success-score ranker so "Grade priority"
+// behaves identically everywhere it's consulted. In "custom" mode, tiers are ordered
+// most-favored first; every grade in the same tier gets the same value (tied, by design),
+// and a grade the teacher hasn't dragged into any tier yet ranks below all of them.
+function buildGradeValueFn(students, settings = {}) {
+  if (settings.gradeDirection === "custom") {
+    const tiers = settings.customGradeOrder || [];
+    const rankByGrade = {};
+    tiers.forEach((tier, i) => {
+      tier.forEach((g) => (rankByGrade[g] = tiers.length - i));
+    });
+    return (grade) => rankByGrade[grade] || 0;
+  }
   const descending = settings.gradeDirection === "lower";
   const grades = [...new Set(students.map((s) => s.grade))].sort((a, b) => (descending ? b - a : a - b));
   const rankByGrade = {};
   grades.forEach((g, i) => (rankByGrade[g] = i + 1));
-  return (grade) => 3 * (rankByGrade[grade] || 1);
+  return (grade) => rankByGrade[grade] || 1;
+}
+function buildGradeScoreFn(students, settings = {}) {
+  if (settings.useGrade === false) return () => 3;
+  const gradeValueFn = buildGradeValueFn(students, settings);
+  return (grade) => 3 * gradeValueFn(grade);
+}
+// Short phrase describing the active grade-priority direction, for status/explanation text.
+function gradeDirectionLabel(settings) {
+  if (settings.gradeDirection === "custom") return "custom order";
+  return `${settings.gradeDirection} grade first`;
 }
 function successScoreFor(student, courseId, gradeScoreFn) {
   const rank = (student.prefs || []).indexOf(courseId) + 1; // 0 when courseId isn't a ranked choice
@@ -505,7 +530,6 @@ function assignStudents(courses, students, priority = {}, settings = {}) {
     useGrade = true,
     usePreference = true,
     useHistory = true,
-    gradeDirection = "higher", // "higher" | "lower"
     order = ["history", "grade"], // tie-break priority order
     useSuccessScore = false,
     successPrioritizeQuantity = false,
@@ -524,7 +548,8 @@ function assignStudents(courses, students, priority = {}, settings = {}) {
   courses.forEach((c) => (assignments[c.id] = []));
   const remaining = students.map((s) => ({ ...s, choiceRank: null }));
 
-  const gradeValue = (s) => (gradeDirection === "lower" ? -s.grade : s.grade);
+  const gradeValueFn = buildGradeValueFn(students, settings);
+  const gradeValue = (s) => gradeValueFn(s.grade);
   const historyValueFor = (s, courseId) => (priority[s.id]?.[courseNameById[courseId]] || 0);
   const historyValueFlat = (s) => {
     const vals = Object.values(priority[s.id] || {});
@@ -905,6 +930,130 @@ function Toggle({ checked, onChange, label, description, disabled }) {
           }}
         />
       </button>
+    </div>
+  );
+}
+
+// Drag-to-order grade tiers for the "Custom ordering" grade priority mode. Each tier is a
+// row of grade chips treated as equally biased; tiers run most-favored (top) to
+// least-favored (bottom). A grade nobody has dragged into a tier yet sits in the "not yet
+// placed" pool above and is treated as the lowest priority until it's moved into one.
+function CustomGradeOrder({ grades, tiers, onChange }) {
+  const [dragGrade, setDragGrade] = useState(null);
+  const safeTiers = tiers || [];
+  const placed = new Set(safeTiers.flat());
+  const unplaced = grades.filter((g) => !placed.has(g));
+
+  const moveGrade = (grade, target) => {
+    let next = safeTiers.map((t) => t.filter((g) => g !== grade));
+    if (target.type === "tier") {
+      next = next.map((t, i) => (i === target.index ? [...t, grade] : t));
+    } else if (target.type === "gap") {
+      next = [...next.slice(0, target.index), [grade], ...next.slice(target.index)];
+    }
+    onChange(next.filter((t) => t.length > 0));
+  };
+
+  const chip = (g) => (
+    <div
+      key={g}
+      draggable
+      onDragStart={() => setDragGrade(g)}
+      onDragEnd={() => setDragGrade(null)}
+      style={{
+        padding: "5px 10px",
+        borderRadius: 6,
+        border: `1px solid ${line}`,
+        background: "#fff",
+        fontFamily: mono,
+        fontSize: 12.5,
+        fontWeight: 700,
+        cursor: "grab",
+        userSelect: "none",
+      }}
+    >
+      Grade {g}
+    </div>
+  );
+
+  const gap = (index) => (
+    <div
+      key={`gap-${index}`}
+      onDragOver={(e) => {
+        if (dragGrade !== null) e.preventDefault();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (dragGrade !== null) moveGrade(dragGrade, { type: "gap", index });
+      }}
+      style={{ height: dragGrade !== null ? 12 : 4 }}
+    />
+  );
+
+  return (
+    <div style={{ padding: "0 0 12px 0" }}>
+      {unplaced.length > 0 && (
+        <div
+          onDragOver={(e) => {
+            if (dragGrade !== null) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (dragGrade !== null) moveGrade(dragGrade, { type: "unassign" });
+          }}
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 6,
+            padding: 8,
+            borderRadius: 8,
+            border: `1px dashed ${line}`,
+            marginBottom: 4,
+          }}
+        >
+          <span style={{ fontSize: 11, color: inkSoft, width: "100%" }}>
+            Not yet placed (lowest priority until dragged into a layer below):
+          </span>
+          {unplaced.map(chip)}
+        </div>
+      )}
+      <div>
+        {gap(0)}
+        {safeTiers.map((tier, i) => (
+          <React.Fragment key={i}>
+            <div
+              onDragOver={(e) => {
+                if (dragGrade !== null) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragGrade !== null) moveGrade(dragGrade, { type: "tier", index: i });
+              }}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: 6,
+                padding: 8,
+                borderRadius: 8,
+                border: `1px solid ${line}`,
+                background: greenSoft,
+                minHeight: 22,
+              }}
+            >
+              <span style={{ fontSize: 11, color: inkSoft, fontWeight: 700, whiteSpace: "nowrap" }}>
+                {i === 0 ? "Most favored" : i === safeTiers.length - 1 ? "Least favored" : `Layer ${i + 1}`}
+              </span>
+              {tier.map(chip)}
+            </div>
+            {gap(i + 1)}
+          </React.Fragment>
+        ))}
+        {safeTiers.length === 0 && (
+          <p style={{ fontSize: 11.5, color: inkSoft, margin: "4px 0 0" }}>Drag a grade down here to start ordering.</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -5504,6 +5653,7 @@ function GroupEditor({ code }) {
                 {[
                   { key: "higher", label: "Higher grade first" },
                   { key: "lower", label: "Lower grade first" },
+                  { key: "custom", label: "Custom ordering" },
                 ].map((opt) => (
                   <button
                     key={opt.key}
@@ -5525,6 +5675,13 @@ function GroupEditor({ code }) {
                   </button>
                 ))}
               </div>
+            )}
+            {settings.useGrade && settings.gradeDirection === "custom" && (
+              <CustomGradeOrder
+                grades={[...new Set(students.map((s) => s.grade))].sort((a, b) => a - b)}
+                tiers={settings.customGradeOrder}
+                onChange={(next) => updateSetting({ customGradeOrder: next })}
+              />
             )}
 
             <Toggle
@@ -5915,7 +6072,7 @@ function GroupEditor({ code }) {
                     <div style={{ borderTop: `1px solid ${line}`, paddingTop: 10 }}>
                       <div style={{ fontWeight: 700, marginBottom: 4 }}>Tie-break logic active this run</div>
                       <div style={{ color: inkSoft, fontSize: 12.5 }}>
-                        Grade priority: {settings.useGrade ? `on (${settings.gradeDirection} grade first)` : "off"} — this student is grade {s.grade}
+                        Grade priority: {settings.useGrade ? `on (${gradeDirectionLabel(settings)})` : "off"} — this student is grade {s.grade}
                         <br />
                         History priority: {settings.useHistory ? `on (${settings.historyMode})` : "off"}
                         {settings.useHistory && info.course ? ` — worth +${info.historyScore} for this course` : ""}
@@ -5942,7 +6099,7 @@ function GroupEditor({ code }) {
             <Play size={15} /> Run assignment
           </Btn>
           <p style={{ fontSize: 11, color: inkSoft, fontFamily: mono, margin: 0, textAlign: "center", maxWidth: 380 }}>
-            preference {settings.usePreference ? "on" : "off"} · grade {settings.useGrade ? `on (${settings.gradeDirection})` : "off"} · history{" "}
+            preference {settings.usePreference ? "on" : "off"} · grade {settings.useGrade ? `on (${gradeDirectionLabel(settings)})` : "off"} · history{" "}
             {settings.useHistory ? `on (${settings.historyMode})` : "off"}
             {settings.useGrade && settings.useHistory ? ` · ties: ${settings.order[0]} first` : ""} — edit in the Logic tab
           </p>
