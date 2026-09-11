@@ -1851,7 +1851,7 @@ export default function App() {
         {view === "teacher-group" && user && activeCode && (
           <>
             <TopBar user={user} onLogout={logout} onBack={() => setView("teacher-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
-            <GroupEditor code={activeCode} />
+            <GroupEditor code={activeCode} onOpenGrid={() => setView("teacher-grid")} />
           </>
         )}
 
@@ -5131,7 +5131,7 @@ function FolderTab({ active, onClick, icon: Icon, label }) {
   );
 }
 
-function GroupEditor({ code }) {
+function GroupEditor({ code, onOpenGrid }) {
   const [group, setGroup] = useState(null);
   const [chain, setChain] = useState(null);
   const [tab, setTab] = useState("courses");
@@ -5475,6 +5475,34 @@ function GroupEditor({ code }) {
             <Lock size={14} /> Finalize Results
           </Btn>
         )}
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 8,
+          background: "#fff",
+          border: `1px solid ${line}`,
+          borderRadius: 9,
+          padding: "14px 14px",
+          marginBottom: 18,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Btn tone="green" onClick={runAssignment} disabled={!canRun}>
+            <Play size={15} /> Run assignment
+          </Btn>
+          <IconBtn title="View responses grid (read-only)" onClick={() => onOpenGrid?.(code)}>
+            <LayoutGrid size={14} />
+          </IconBtn>
+        </div>
+        <p style={{ fontSize: 11, color: inkSoft, fontFamily: mono, margin: 0, textAlign: "center", maxWidth: 380 }}>
+          preference {settings.usePreference ? "on" : "off"} · grade {settings.useGrade ? `on (${gradeDirectionLabel(settings)})` : "off"} · history{" "}
+          {settings.useHistory ? `on (${settings.historyMode})` : "off"}
+          {settings.useGrade && settings.useHistory ? ` · ties: ${settings.order[0]} first` : ""} — edit in the Logic tab
+        </p>
       </div>
 
       {confirmFinalize && (
@@ -6291,18 +6319,6 @@ function GroupEditor({ code }) {
         </div>
       )}
 
-      {(tab === "courses" || tab === "students") && (
-        <div style={{ marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-          <Btn onClick={runAssignment} disabled={!canRun}>
-            <Play size={15} /> Run assignment
-          </Btn>
-          <p style={{ fontSize: 11, color: inkSoft, fontFamily: mono, margin: 0, textAlign: "center", maxWidth: 380 }}>
-            preference {settings.usePreference ? "on" : "off"} · grade {settings.useGrade ? `on (${gradeDirectionLabel(settings)})` : "off"} · history{" "}
-            {settings.useHistory ? `on (${settings.historyMode})` : "off"}
-            {settings.useGrade && settings.useHistory ? ` · ties: ${settings.order[0]} first` : ""} — edit in the Logic tab
-          </p>
-        </div>
-      )}
     </div>
   );
 }
