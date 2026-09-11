@@ -5881,59 +5881,13 @@ function GroupEditor({ code, onOpenGrid }) {
                           style={{ color: inkSoft, flexShrink: 0, transition: "transform 0.15s", transform: expanded ? "rotate(90deg)" : "none" }}
                         />
                         <span style={{ flex: 1, minWidth: 0 }}>
-                          {renamingStudentId === s.id ? (
-                            <span onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              <input
-                                autoFocus
-                                value={renameDraft}
-                                onChange={(e) => setRenameDraft(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") saveRenameStudent(s.id);
-                                  if (e.key === "Escape") cancelRenameStudent();
-                                }}
-                                style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "3px 7px", fontSize: 13, fontFamily: sans, width: 160 }}
-                              />
-                              <button onClick={() => saveRenameStudent(s.id)} title="Save" style={{ background: "none", border: "none", color: green, cursor: "pointer", display: "flex", padding: 0 }}>
-                                <Check size={14} />
-                              </button>
-                              <button onClick={cancelRenameStudent} title="Cancel" style={{ background: "none", border: "none", color: clay, cursor: "pointer", display: "flex", padding: 0 }}>
-                                <X size={14} />
-                              </button>
-                              {group.studentNameOverrides?.[s.id] && (
-                                <button
-                                  onClick={() => revertStudentName(s.id)}
-                                  title={`Revert to official name: ${s.name}`}
-                                  style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, fontSize: 11.5, fontFamily: sans, padding: 0 }}
-                                >
-                                  <RefreshCw size={11} /> Revert to original
-                                </button>
-                              )}
-                            </span>
-                          ) : (
-                            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              <span style={{ fontWeight: 600 }}>{displayNameFor(s.id, s.name)}</span>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  startRenameStudent(s);
-                                }}
-                                title="Change display name (only how you see them — doesn't touch their account)"
-                                style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", padding: 0 }}
-                              >
-                                <Pencil size={11} />
-                              </button>
-                              {group.studentNameOverrides?.[s.id] && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    revertStudentName(s.id);
-                                  }}
-                                  title={`Revert to official name: ${s.name}`}
-                                  style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, padding: 0 }}
-                                >
-                                  <RefreshCw size={11} />
-                                </button>
-                              )}
+                          <span style={{ fontWeight: 600 }}>{displayNameFor(s.id, s.name)}</span>
+                          {group.studentNameOverrides?.[s.id] && (
+                            <span
+                              title={`Renamed from: ${s.name}`}
+                              style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: inkSoft, background: "#E4E9F1", borderRadius: 4, padding: "1px 5px", verticalAlign: "middle" }}
+                            >
+                              renamed
                             </span>
                           )}
                           {s.email && (
@@ -5959,7 +5913,44 @@ function GroupEditor({ code, onOpenGrid }) {
                         </IconBtn>
                       </div>
                       {expanded && (
-                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${line}`, display: "grid", gap: 8 }}>
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${line}`, display: "grid", gap: 10 }} onClick={(e) => e.stopPropagation()}>
+                          <div style={{ fontSize: 12.5 }}>
+                            <strong>Display name:</strong>
+                            <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              {renamingStudentId === s.id ? (
+                                <>
+                                  <input
+                                    autoFocus
+                                    value={renameDraft}
+                                    onChange={(e) => setRenameDraft(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") saveRenameStudent(s.id);
+                                      if (e.key === "Escape") cancelRenameStudent();
+                                    }}
+                                    style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "5px 8px", fontSize: 13, fontFamily: sans, width: 180 }}
+                                  />
+                                  <IconBtn tone="green" onClick={() => saveRenameStudent(s.id)}>
+                                    <Check size={12} /> Save
+                                  </IconBtn>
+                                  <IconBtn onClick={cancelRenameStudent}>
+                                    <X size={12} /> Cancel
+                                  </IconBtn>
+                                </>
+                              ) : (
+                                <>
+                                  <span>{displayNameFor(s.id, s.name)}</span>
+                                  <IconBtn onClick={() => startRenameStudent(s)} title="Only changes what you see — doesn't touch their account">
+                                    <Pencil size={12} /> Rename
+                                  </IconBtn>
+                                  {group.studentNameOverrides?.[s.id] && (
+                                    <IconBtn onClick={() => revertStudentName(s.id)} title={`Revert to official name: ${s.name}`}>
+                                      <RefreshCw size={12} /> Revert to original
+                                    </IconBtn>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </div>
                           <div style={{ fontSize: 12.5 }}>
                             <strong>Grade:</strong> {s.grade}
                           </div>
