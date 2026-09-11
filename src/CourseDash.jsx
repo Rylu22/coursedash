@@ -1780,7 +1780,10 @@ export default function App() {
         backgroundImage: `radial-gradient(${line} 1px, transparent 1px)`,
         backgroundSize: "22px 22px",
         minHeight: "100vh",
-        padding: "28px 20px",
+        // Extra bottom padding beyond the normal 28px — on some phones/tablets the
+        // OS's on-screen navigation/taskbar overlaps the very bottom of the page and
+        // covers whatever's last on it, so give it room to scroll clear.
+        padding: "28px 20px 100px",
         fontFamily: sans,
         color: ink,
       }}
