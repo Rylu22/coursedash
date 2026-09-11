@@ -24,6 +24,19 @@ body {
   flex: 1;
 }
 
+/* Primary action buttons (Btn): a slight shrink on hover that pops back to full size
+   the moment it's pressed or the cursor leaves, for a bit of tactile feedback on the
+   buttons that actually matter (run assignment, activate, submit, etc). */
+.btn-pop {
+  transition: transform 0.12s ease;
+}
+.btn-pop:hover:not(:disabled) {
+  transform: scale(0.96);
+}
+.btn-pop:active:not(:disabled) {
+  transform: scale(1);
+}
+
 .leader-lines {
   position: fixed;
   inset: 0;

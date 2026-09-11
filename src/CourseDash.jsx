@@ -855,6 +855,7 @@ function Btn({ onClick, children, tone = "green", full, disabled }) {
   return (
     <button
       type="button"
+      className="btn-pop"
       onClick={onClick}
       disabled={disabled}
       style={{
