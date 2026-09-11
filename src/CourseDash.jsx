@@ -959,8 +959,16 @@ function Toggle({ checked, onChange, label, description, disabled }) {
 // row of grade chips treated as equally biased; tiers run most-favored (top) to
 // least-favored (bottom). A grade nobody has dragged into a tier yet sits in the "not yet
 // placed" pool above and is treated as the lowest priority until it's moved into one.
+//
+// Dropping ON a layer box ties the grade with whatever's already there (equal priority).
+// Dropping in the gap BETWEEN layers creates a new priority level instead. Those gaps used
+// to be a near-invisible sliver, so most drags landed on a layer by accident and silently
+// tied grades the teacher meant to rank separately — they're now large, always visible, and
+// light up with their own "+ New layer" label while something's being dragged so the two
+// outcomes are impossible to confuse.
 function CustomGradeOrder({ grades, tiers, onChange }) {
   const [dragGrade, setDragGrade] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null); // { type: "gap" | "tier" | "unassign", index }
   const safeTiers = tiers || [];
   const placed = new Set(safeTiers.flat());
   const unplaced = grades.filter((g) => !placed.has(g));
@@ -975,6 +983,11 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
     onChange(next.filter((t) => t.length > 0));
   };
 
+  const clearDrag = () => {
+    setDragGrade(null);
+    setDropTarget(null);
+  };
+
   const chip = (g) => (
     <div
       key={g}
@@ -986,7 +999,7 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
         e.dataTransfer.effectAllowed = "move";
         e.dataTransfer.setData("text/plain", String(g));
       }}
-      onDragEnd={() => setDragGrade(null)}
+      onDragEnd={clearDrag}
       style={{
         padding: "5px 10px",
         borderRadius: 6,
@@ -1003,31 +1016,68 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
     </div>
   );
 
-  const gap = (index) => (
-    <div
-      key={`gap-${index}`}
-      onDragOver={(e) => {
-        if (dragGrade !== null) e.preventDefault();
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (dragGrade !== null) moveGrade(dragGrade, { type: "gap", index });
-      }}
-      style={{ height: dragGrade !== null ? 14 : 6 }}
-    />
-  );
+  const gap = (index) => {
+    const active = dropTarget?.type === "gap" && dropTarget.index === index;
+    return (
+      <div
+        key={`gap-${index}`}
+        onDragOver={(e) => {
+          if (dragGrade !== null) e.preventDefault();
+        }}
+        onDragEnter={(e) => {
+          if (dragGrade === null) return;
+          e.preventDefault();
+          setDropTarget({ type: "gap", index });
+        }}
+        onDragLeave={() => setDropTarget((t) => (t?.type === "gap" && t.index === index ? null : t))}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (dragGrade !== null) moveGrade(dragGrade, { type: "gap", index });
+          clearDrag();
+        }}
+        style={{
+          height: dragGrade !== null ? (active ? 36 : 18) : 10,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          margin: "2px 0",
+          borderRadius: 6,
+          border: dragGrade !== null ? `2px dashed ${active ? green : line}` : "none",
+          background: active ? greenSoft : "transparent",
+          color: green,
+          fontSize: 11,
+          fontWeight: 700,
+          fontFamily: sans,
+          transition: "height .12s, background .12s, border-color .12s",
+        }}
+      >
+        {active && "+ New layer here"}
+      </div>
+    );
+  };
 
   return (
     <div style={{ padding: "0 0 12px 0" }}>
+      <p style={{ fontSize: 11, color: inkSoft, margin: "0 0 8px" }}>
+        Drop a grade <strong>onto</strong> a layer to tie it with that layer (equal priority), or into the{" "}
+        <strong>gap</strong> between layers to give it its own priority level.
+      </p>
       {unplaced.length > 0 && (
         <div
           onDragOver={(e) => {
             if (dragGrade !== null) e.preventDefault();
           }}
+          onDragEnter={(e) => {
+            if (dragGrade === null) return;
+            e.preventDefault();
+            setDropTarget({ type: "unassign" });
+          }}
+          onDragLeave={() => setDropTarget((t) => (t?.type === "unassign" ? null : t))}
           onDrop={(e) => {
             e.preventDefault();
             if (dragGrade !== null) moveGrade(dragGrade, { type: "unassign" });
+            clearDrag();
           }}
           style={{
             display: "flex",
@@ -1036,7 +1086,8 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
             gap: 6,
             padding: 8,
             borderRadius: 8,
-            border: `1px dashed ${line}`,
+            border: `1px dashed ${dropTarget?.type === "unassign" ? green : line}`,
+            background: dropTarget?.type === "unassign" ? greenSoft : "transparent",
             marginBottom: 4,
           }}
         >
@@ -1049,7 +1100,7 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
       {/* Catches any drop that lands in this section but misses a specific tier/gap
           target underneath it (the specific ones stopPropagation so this only fires as
           a fallback) — treats it as "add to the end" so the whole area is droppable,
-          not just the thin gap strips. */}
+          not just the gap strips. */}
       <div
         onDragOver={(e) => {
           if (dragGrade !== null) e.preventDefault();
@@ -1057,6 +1108,7 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
         onDrop={(e) => {
           e.preventDefault();
           if (dragGrade !== null) moveGrade(dragGrade, { type: "gap", index: safeTiers.length });
+          clearDrag();
         }}
         style={
           safeTiers.length === 0
@@ -1065,37 +1117,51 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
         }
       >
         {gap(0)}
-        {safeTiers.map((tier, i) => (
-          <React.Fragment key={i}>
-            <div
-              onDragOver={(e) => {
-                if (dragGrade !== null) e.preventDefault();
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (dragGrade !== null) moveGrade(dragGrade, { type: "tier", index: i });
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                flexWrap: "wrap",
-                gap: 6,
-                padding: 8,
-                borderRadius: 8,
-                border: `1px solid ${line}`,
-                background: greenSoft,
-                minHeight: 22,
-              }}
-            >
-              <span style={{ fontSize: 11, color: inkSoft, fontWeight: 700, whiteSpace: "nowrap" }}>
-                {i === 0 ? "Most favored" : i === safeTiers.length - 1 ? "Least favored" : `Layer ${i + 1}`}
-              </span>
-              {tier.map(chip)}
-            </div>
-            {gap(i + 1)}
-          </React.Fragment>
-        ))}
+        {safeTiers.map((tier, i) => {
+          const tierActive = dropTarget?.type === "tier" && dropTarget.index === i;
+          return (
+            <React.Fragment key={i}>
+              <div
+                onDragOver={(e) => {
+                  if (dragGrade !== null) e.preventDefault();
+                }}
+                onDragEnter={(e) => {
+                  if (dragGrade === null) return;
+                  e.preventDefault();
+                  setDropTarget({ type: "tier", index: i });
+                }}
+                onDragLeave={() => setDropTarget((t) => (t?.type === "tier" && t.index === i ? null : t))}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (dragGrade !== null) moveGrade(dragGrade, { type: "tier", index: i });
+                  clearDrag();
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: 6,
+                  padding: 8,
+                  borderRadius: 8,
+                  border: `2px solid ${tierActive ? green : "transparent"}`,
+                  outline: `1px solid ${line}`,
+                  outlineOffset: -1,
+                  background: greenSoft,
+                  minHeight: 22,
+                  transition: "border-color .12s",
+                }}
+              >
+                <span style={{ fontSize: 11, color: inkSoft, fontWeight: 700, whiteSpace: "nowrap" }}>
+                  {i === 0 ? "Most favored" : i === safeTiers.length - 1 ? "Least favored" : `Layer ${i + 1}`}
+                </span>
+                {tier.map(chip)}
+                {tierActive && <span style={{ fontSize: 11, color: green, fontWeight: 700 }}>+ tie with this layer</span>}
+              </div>
+              {gap(i + 1)}
+            </React.Fragment>
+          );
+        })}
         {safeTiers.length === 0 && (
           <span style={{ fontSize: 11.5, color: inkSoft }}>Drag a grade here to start ordering.</span>
         )}
