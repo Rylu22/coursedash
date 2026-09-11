@@ -2465,18 +2465,24 @@ function PriorityBadge({ scores, courseName }) {
   return (
     <span
       style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
         background: claySoft,
         color: clay,
         borderRadius: 4,
-        padding: "2px 7px",
+        minWidth: 18,
+        height: 18,
+        padding: "0 3px",
         fontSize: 10.5,
         fontWeight: 700,
         fontFamily: mono,
         whiteSpace: "nowrap",
+        flexShrink: 0,
       }}
       title={title}
     >
-      priority +{value}
+      +{value}
     </span>
   );
 }
