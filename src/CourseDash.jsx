@@ -291,6 +291,7 @@ const DEFAULT_LOGIC_SETTINGS = {
   customGradeOrder: [], // "custom" mode only: [[gradeA, gradeB], [gradeC], ...] most-favored tier first
   order: ["history", "grade"], // tie-break priority order
   historyMode: "boost", // "boost" | "sameCourse" | "differentCourse" | "smartWeight"
+  historyGroupCodes: null, // null = every prior group in the series; otherwise an explicit array of group codes to draw history from
   allowRequests: true,
   requestWindowDays: 3,
   useSuccessScore: false,
@@ -695,14 +696,21 @@ function assignStudents(courses, students, priority = {}, settings = {}) {
 //    2nd adds 4, 3rd adds 6, anything else (an unranked course, or no course at all) adds 10.
 //    A student who's never been in a prior group of this series scores 0. Whoever has
 //    accumulated the highest total gets priority this year.
-async function computeHistoryPriority(group, students, mode = "boost") {
+async function computeHistoryPriority(group, students, mode = "boost", allowedCodes = null) {
   const priority = {};
   if (!group.chainId) return priority;
   const chain = await storeGet(`chain:${group.chainId}`, true);
   if (!chain) return priority;
   const idx = chain.groupCodes.indexOf(group.code);
   if (idx <= 0) return priority;
-  const priorCodes = chain.groupCodes.slice(0, idx).reverse(); // most recent first
+  let priorCodes = chain.groupCodes.slice(0, idx).reverse(); // most recent first
+  // `allowedCodes` (from the Logic tab's "which previous groups" picker) narrows this to
+  // an explicit subset instead of every prior group in the series; null keeps the default
+  // of using all of them, including any added to the series later.
+  if (Array.isArray(allowedCodes)) {
+    const allowed = new Set(allowedCodes);
+    priorCodes = priorCodes.filter((c) => allowed.has(c));
+  }
   const priorGroups = await Promise.all(priorCodes.map((c) => storeGet(`group:${c}`, true).then(normalizeGroup)));
 
   const nameById = (g) => {
@@ -1167,6 +1175,105 @@ function CustomGradeOrder({ grades, tiers, onChange }) {
           <span style={{ fontSize: 11.5, color: inkSoft }}>Drag a grade here to start ordering.</span>
         )}
       </div>
+    </div>
+  );
+}
+
+// Lets a teacher restrict "Previous results priority" to a subset of the series' earlier
+// groups instead of always pulling from every one of them. `selected` is null for "every
+// prior group" (the default, and what keeps a newly-added-to-the-series group included
+// automatically) or an explicit array of group codes to use instead. `options` is every
+// prior group available, most recent first.
+function HistorySourcePicker({ options, selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [countDraft, setCountDraft] = useState("");
+  const allCodes = options.map((o) => o.code);
+  const effectiveSet = new Set(selected == null ? allCodes : selected.filter((c) => allCodes.includes(c)));
+
+  const countLabel =
+    selected == null
+      ? `All ${options.length} previous group${options.length === 1 ? "" : "s"}`
+      : `${effectiveSet.size} of ${options.length} previous group${options.length === 1 ? "" : "s"}`;
+
+  const toggle = (code) => {
+    const next = new Set(effectiveSet);
+    if (next.has(code)) next.delete(code);
+    else next.add(code);
+    // Collapse back to "all" (null) once everything's checked again, so a group added to
+    // the series later is included by default instead of silently left unchecked.
+    onChange(next.size === allCodes.length ? null : allCodes.filter((c) => next.has(c)));
+  };
+
+  const applyCount = () => {
+    const n = Math.max(1, Math.min(allCodes.length, Math.round(Number(countDraft)) || allCodes.length));
+    onChange(n >= allCodes.length ? null : allCodes.slice(0, n));
+    setCountDraft("");
+  };
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          width: "100%",
+          padding: "8px 10px",
+          borderRadius: 7,
+          border: `1px solid ${line}`,
+          background: "#fff",
+          fontFamily: sans,
+          fontSize: 12.5,
+          cursor: "pointer",
+          color: ink,
+        }}
+      >
+        <span>
+          Which previous groups: <strong>{countLabel}</strong>
+        </span>
+        <span style={{ color: inkSoft, fontSize: 11 }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div style={{ border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 7px 7px", padding: 10, background: "#fff" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10, fontSize: 12, color: inkSoft }}>
+            <span>Use the most recent</span>
+            <input
+              type="number"
+              min={1}
+              max={allCodes.length}
+              value={countDraft}
+              onChange={(e) => setCountDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && applyCount()}
+              placeholder={String(allCodes.length)}
+              style={{ width: 48, border: `1px solid ${line}`, borderRadius: 6, padding: "4px 6px", fontFamily: mono, fontSize: 12.5, textAlign: "center" }}
+            />
+            <span>group{allCodes.length === 1 ? "" : "s"} (1 = just the previous one)</span>
+            <Btn tone="ghost" onClick={applyCount}>
+              Apply
+            </Btn>
+          </div>
+          <div style={{ display: "grid", gap: 4, maxHeight: 180, overflowY: "auto" }}>
+            {options.map((o, i) => (
+              <label key={o.code} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                <input type="checkbox" checked={effectiveSet.has(o.code)} onChange={() => toggle(o.code)} />
+                {o.name}
+                {i === 0 && <span style={{ fontSize: 10.5, color: inkSoft }}>(most recent)</span>}
+              </label>
+            ))}
+          </div>
+          {selected != null && (
+            <button
+              type="button"
+              onClick={() => onChange(null)}
+              style={{ marginTop: 10, fontSize: 11.5, color: green, background: "none", border: "none", cursor: "pointer", padding: 0, fontWeight: 700, fontFamily: sans }}
+            >
+              Reset to all groups
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -5153,6 +5260,7 @@ function GroupEditor({ code, onOpenGrid }) {
   const [result, setResult] = useState(null);
   const [priority, setPriority] = useState({});
   const [loadingPriority, setLoadingPriority] = useState(false);
+  const [priorGroupOptions, setPriorGroupOptions] = useState([]); // [{code, name}] for this series, most recent first
   const [copied, setCopied] = useState(false);
   const [savingCourses, setSavingCourses] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -5207,10 +5315,23 @@ function GroupEditor({ code, onOpenGrid }) {
       const subs = await loadStudents();
       if (g?.chainId && subs.length && s.useHistory) {
         setLoadingPriority(true);
-        setPriority(await computeHistoryPriority(g, subs, s.historyMode));
+        setPriority(await computeHistoryPriority(g, subs, s.historyMode, s.historyGroupCodes));
         setLoadingPriority(false);
       } else {
         setPriority({});
+      }
+      if (g?.chainId) {
+        const chainRec = await storeGet(`chain:${g.chainId}`, true);
+        const idx = chainRec ? chainRec.groupCodes.indexOf(g.code) : -1;
+        if (idx > 0) {
+          const priorCodes = chainRec.groupCodes.slice(0, idx).reverse(); // most recent first
+          const priorGroups = await Promise.all(priorCodes.map((c) => storeGet(`group:${c}`, true)));
+          setPriorGroupOptions(priorCodes.map((c, i) => ({ code: c, name: priorGroups[i]?.name || c })));
+        } else {
+          setPriorGroupOptions([]);
+        }
+      } else {
+        setPriorGroupOptions([]);
       }
     })();
   }, [loadGroup, loadStudents]);
@@ -5227,10 +5348,10 @@ function GroupEditor({ code, onOpenGrid }) {
     const next = { ...settings, ...patch };
     setSettings(next);
     if (group) await saveLogicSettingsForGroup(group, next);
-    if (group?.chainId && students.length && ("useHistory" in patch || "historyMode" in patch)) {
+    if (group?.chainId && students.length && ("useHistory" in patch || "historyMode" in patch || "historyGroupCodes" in patch)) {
       if (next.useHistory) {
         setLoadingPriority(true);
-        setPriority(await computeHistoryPriority(group, students, next.historyMode));
+        setPriority(await computeHistoryPriority(group, students, next.historyMode, next.historyGroupCodes));
         setLoadingPriority(false);
       } else {
         setPriority({});
@@ -5920,6 +6041,13 @@ function GroupEditor({ code, onOpenGrid }) {
                   </button>
                 ))}
               </div>
+            )}
+            {settings.useHistory && chain && priorGroupOptions.length > 0 && (
+              <HistorySourcePicker
+                options={priorGroupOptions}
+                selected={settings.historyGroupCodes}
+                onChange={(codes) => updateSetting({ historyGroupCodes: codes })}
+              />
             )}
             {settings.useHistory && !chain && (
               <p style={{ fontSize: 12, color: inkSoft, marginTop: -4, marginBottom: 12 }}>
