@@ -5459,6 +5459,38 @@ function GroupEditor({ code, onOpenGrid }) {
     if (renamingStudentId === studentId) cancelRenameStudent();
   };
 
+  // ---- Attendance check ----
+  // Paste a roster (one name per line, e.g. read off from a school attendance sheet)
+  // and see which typed names don't match anyone who responded, and which responders
+  // weren't on the pasted list. Matches against whatever name the teacher actually
+  // sees (a rename override if set), case- and whitespace-insensitively.
+  const [attendanceOpen, setAttendanceOpen] = useState(false);
+  const [attendanceText, setAttendanceText] = useState("");
+  const [attendanceResult, setAttendanceResult] = useState(null); // { notInGroup: string[], notCalled: string[] }
+  const normalizeName = (s) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const checkAttendance = () => {
+    const typedNames = attendanceText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const rosterByName = {};
+    students.forEach((s) => {
+      const label = displayNameFor(s.id, s.name);
+      const key = normalizeName(label);
+      if (!rosterByName[key]) rosterByName[key] = [];
+      rosterByName[key].push(s.id);
+    });
+    const calledIds = new Set();
+    const notInGroup = [];
+    typedNames.forEach((raw) => {
+      const matches = rosterByName[normalizeName(raw)];
+      if (matches?.length) matches.forEach((id) => calledIds.add(id));
+      else notInGroup.push(raw);
+    });
+    const notCalled = students
+      .filter((s) => !calledIds.has(s.id))
+      .map((s) => displayNameFor(s.id, s.name))
+      .sort((a, b) => a.localeCompare(b));
+    setAttendanceResult({ notInGroup, notCalled });
+  };
+
   // Course name a student picked as their Nth choice (idx is 0-based), for sorting
   // the Students list by choice — students without that many ranked choices sort last.
   const choiceNameAt = (s, idx) => courses.find((c) => c.id === s.prefs?.[idx])?.name || "";
@@ -5836,10 +5868,80 @@ function GroupEditor({ code, onOpenGrid }) {
               <p style={{ fontSize: 12.5, color: inkSoft, margin: 0 }}>
                 Students submit their own choices from the join screen. This list refreshes from their responses.
               </p>
-              <IconBtn onClick={loadStudents} tone="green">
-                <RefreshCw size={13} /> {loadingStudents ? "Loading…" : "Refresh"}
-              </IconBtn>
+              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                <IconBtn onClick={() => setAttendanceOpen((o) => !o)}>
+                  <CheckSquare size={13} /> Student check
+                </IconBtn>
+                <IconBtn onClick={loadStudents} tone="green">
+                  <RefreshCw size={13} /> {loadingStudents ? "Loading…" : "Refresh"}
+                </IconBtn>
+              </div>
             </div>
+            {attendanceOpen && (
+              <div style={{ marginBottom: 14, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: 14 }}>
+                <p style={{ fontSize: 12.5, color: inkSoft, margin: "0 0 8px" }}>
+                  Type or paste students' names, one per line — from a roster or attendance sheet. Case doesn't matter.
+                </p>
+                <textarea
+                  value={attendanceText}
+                  onChange={(e) => setAttendanceText(e.target.value)}
+                  placeholder={"Jane Doe\nJohn Smith\n…"}
+                  rows={6}
+                  style={{ width: "100%", fontFamily: mono, fontSize: 12.5, border: `1px solid ${line}`, borderRadius: 6, padding: 8, resize: "vertical", boxSizing: "border-box" }}
+                />
+                <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                  <Btn tone="green" onClick={checkAttendance} disabled={!attendanceText.trim()}>
+                    <CheckSquare size={14} /> Check students
+                  </Btn>
+                  <Btn
+                    tone="ghost"
+                    onClick={() => {
+                      setAttendanceOpen(false);
+                      setAttendanceText("");
+                      setAttendanceResult(null);
+                    }}
+                  >
+                    Close
+                  </Btn>
+                </div>
+                {attendanceResult && (
+                  <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 11.5, fontWeight: 700, color: clay, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>
+                        Not in this group ({attendanceResult.notInGroup.length})
+                      </div>
+                      {attendanceResult.notInGroup.length === 0 ? (
+                        <p style={{ fontSize: 12.5, color: inkSoft, margin: 0 }}>Every typed name matched a student who responded.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {attendanceResult.notInGroup.map((name, i) => (
+                            <span key={i} style={{ background: claySoft, color: clay, borderRadius: 5, padding: "3px 8px", fontSize: 12.5 }}>
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11.5, fontWeight: 700, color: gold, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>
+                        In the group but not checked in ({attendanceResult.notCalled.length})
+                      </div>
+                      {attendanceResult.notCalled.length === 0 ? (
+                        <p style={{ fontSize: 12.5, color: inkSoft, margin: 0 }}>Every student who responded was on the list.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {attendanceResult.notCalled.map((name, i) => (
+                            <span key={i} style={{ background: goldSoft, color: gold, borderRadius: 5, padding: "3px 8px", fontSize: 12.5 }}>
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {students.length > 0 && (
               <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                 <div style={{ position: "relative", flex: 1 }}>
