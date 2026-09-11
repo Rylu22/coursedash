@@ -5904,7 +5904,25 @@ function GroupEditor({ code, onOpenGrid }) {
                     Close
                   </Btn>
                 </div>
-                {attendanceResult && (
+                {attendanceResult && attendanceResult.notInGroup.length === 0 && attendanceResult.notCalled.length === 0 && (
+                  <div
+                    style={{
+                      marginTop: 14,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      background: greenSoft,
+                      color: green,
+                      borderRadius: 8,
+                      padding: "10px 14px",
+                      fontWeight: 700,
+                      fontSize: 13.5,
+                    }}
+                  >
+                    <Check size={16} /> All Students Checked
+                  </div>
+                )}
+                {attendanceResult && (attendanceResult.notInGroup.length > 0 || attendanceResult.notCalled.length > 0) && (
                   <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
                     <div>
                       <div style={{ fontSize: 11.5, fontWeight: 700, color: clay, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>
