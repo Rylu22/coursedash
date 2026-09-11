@@ -3430,7 +3430,7 @@ function TeacherResponsesGrid({ code }) {
     const loadedRows = subs
       .map((s) => ({
         studentId: s.id,
-        name: s.name,
+        name: g?.studentNameOverrides?.[s.id] || s.name,
         grade: s.grade,
         assignments: Object.fromEntries((s.prefs || []).filter(Boolean).map((courseId, i) => [courseId, i + 1])),
         extraAnswers: s.extraAnswers || {},
@@ -5425,6 +5425,40 @@ function GroupEditor({ code, onOpenGrid }) {
     setStudents(students.filter((s) => s.id !== studentId));
   };
 
+  // Teacher-only display name override for a student's response, stored on the group
+  // itself (never the submission or the student's account) — so it's purely a local
+  // relabeling for this teacher's view, with the official name always recoverable.
+  const [renamingStudentId, setRenamingStudentId] = useState(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const displayNameFor = (studentId, officialName) => group?.studentNameOverrides?.[studentId] || officialName;
+  const startRenameStudent = (s) => {
+    setRenamingStudentId(s.id);
+    setRenameDraft(displayNameFor(s.id, s.name));
+  };
+  const cancelRenameStudent = () => {
+    setRenamingStudentId(null);
+    setRenameDraft("");
+  };
+  const saveStudentOverrides = async (nextOverrides) => {
+    const updated = { ...group, studentNameOverrides: nextOverrides };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
+  };
+  const saveRenameStudent = async (studentId) => {
+    const trimmed = renameDraft.trim();
+    const next = { ...(group.studentNameOverrides || {}) };
+    if (trimmed) next[studentId] = trimmed;
+    else delete next[studentId];
+    await saveStudentOverrides(next);
+    setRenamingStudentId(null);
+  };
+  const revertStudentName = async (studentId) => {
+    const next = { ...(group.studentNameOverrides || {}) };
+    delete next[studentId];
+    await saveStudentOverrides(next);
+    if (renamingStudentId === studentId) cancelRenameStudent();
+  };
+
   // Course name a student picked as their Nth choice (idx is 0-based), for sorting
   // the Students list by choice — students without that many ranked choices sort last.
   const choiceNameAt = (s, idx) => courses.find((c) => c.id === s.prefs?.[idx])?.name || "";
@@ -5452,7 +5486,7 @@ function GroupEditor({ code, onOpenGrid }) {
         break;
       case "name":
       default:
-        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        sorted.sort((a, b) => displayNameFor(a.id, a.name).localeCompare(displayNameFor(b.id, b.name)));
     }
     return sorted;
   };
@@ -5831,7 +5865,7 @@ function GroupEditor({ code, onOpenGrid }) {
               {sortStudents(
                 students.filter((s) => {
                   const q = studentSearch.trim().toLowerCase();
-                  return !q || s.name.toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
+                  return !q || s.name.toLowerCase().includes(q) || displayNameFor(s.id, s.name).toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
                 })
               )
                 .map((s) => {
@@ -5847,7 +5881,61 @@ function GroupEditor({ code, onOpenGrid }) {
                           style={{ color: inkSoft, flexShrink: 0, transition: "transform 0.15s", transform: expanded ? "rotate(90deg)" : "none" }}
                         />
                         <span style={{ flex: 1, minWidth: 0 }}>
-                          <span style={{ fontWeight: 600 }}>{s.name}</span>
+                          {renamingStudentId === s.id ? (
+                            <span onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <input
+                                autoFocus
+                                value={renameDraft}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") saveRenameStudent(s.id);
+                                  if (e.key === "Escape") cancelRenameStudent();
+                                }}
+                                style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "3px 7px", fontSize: 13, fontFamily: sans, width: 160 }}
+                              />
+                              <button onClick={() => saveRenameStudent(s.id)} title="Save" style={{ background: "none", border: "none", color: green, cursor: "pointer", display: "flex", padding: 0 }}>
+                                <Check size={14} />
+                              </button>
+                              <button onClick={cancelRenameStudent} title="Cancel" style={{ background: "none", border: "none", color: clay, cursor: "pointer", display: "flex", padding: 0 }}>
+                                <X size={14} />
+                              </button>
+                              {group.studentNameOverrides?.[s.id] && (
+                                <button
+                                  onClick={() => revertStudentName(s.id)}
+                                  title={`Revert to official name: ${s.name}`}
+                                  style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, fontSize: 11.5, fontFamily: sans, padding: 0 }}
+                                >
+                                  <RefreshCw size={11} /> Revert to original
+                                </button>
+                              )}
+                            </span>
+                          ) : (
+                            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ fontWeight: 600 }}>{displayNameFor(s.id, s.name)}</span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startRenameStudent(s);
+                                }}
+                                title="Change display name (only how you see them — doesn't touch their account)"
+                                style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", padding: 0 }}
+                              >
+                                <Pencil size={11} />
+                              </button>
+                              {group.studentNameOverrides?.[s.id] && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    revertStudentName(s.id);
+                                  }}
+                                  title={`Revert to official name: ${s.name}`}
+                                  style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, padding: 0 }}
+                                >
+                                  <RefreshCw size={11} />
+                                </button>
+                              )}
+                            </span>
+                          )}
                           {s.email && (
                             <span style={{ display: "block", fontSize: 11.5, color: inkSoft, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               {s.email}
@@ -5906,7 +5994,7 @@ function GroupEditor({ code, onOpenGrid }) {
                 studentSearch.trim() &&
                 !students.some((s) => {
                   const q = studentSearch.trim().toLowerCase();
-                  return s.name.toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
+                  return s.name.toLowerCase().includes(q) || displayNameFor(s.id, s.name).toLowerCase().includes(q) || s.email?.toLowerCase().includes(q);
                 }) && <p style={{ color: inkSoft, fontSize: 13 }}>No students match "{studentSearch}".</p>}
             </div>
           </div>
@@ -6210,7 +6298,7 @@ function GroupEditor({ code, onOpenGrid }) {
                                 >
                                   <td style={{ padding: "6px 14px", width: "50%" }}>
                                     {!group.resultsFinalized && <GripVertical size={11} style={{ opacity: 0.4, marginRight: 4, verticalAlign: "-1px" }} />}
-                                    {s.name} <PriorityBadge scores={priority[s.id]} courseName={c.name} />
+                                    {displayNameFor(s.id, s.name)} <PriorityBadge scores={priority[s.id]} courseName={c.name} />
                                   </td>
                                   <td style={{ padding: "6px 8px", color: inkSoft }}>Grade {s.grade}</td>
                                   <td style={{ padding: "6px 14px", textAlign: "right" }}>
@@ -6284,7 +6372,7 @@ function GroupEditor({ code, onOpenGrid }) {
                               >
                                 <td style={{ padding: "6px 14px", width: "50%" }}>
                                   {!group.resultsFinalized && <GripVertical size={11} style={{ opacity: 0.4, marginRight: 4, verticalAlign: "-1px" }} />}
-                                  {s.name} <PriorityBadge scores={priority[s.id]} />
+                                  {displayNameFor(s.id, s.name)} <PriorityBadge scores={priority[s.id]} />
                                 </td>
                                 <td style={{ padding: "6px 8px", color: inkSoft }}>Grade {s.grade}</td>
                                 <td style={{ padding: "6px 14px", textAlign: "right", color: inkSoft }}>
@@ -6333,7 +6421,7 @@ function GroupEditor({ code, onOpenGrid }) {
               <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 380, maxWidth: "100%" }}>
                 <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: inkSoft, textTransform: "uppercase" }}>How this result happened</div>
                 <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 14px" }}>
-                  {s.name} → {info.course ? info.course.name : "Unassigned"}
+                  {displayNameFor(s.id, s.name)} → {info.course ? info.course.name : "Unassigned"}
                 </h3>
 
                 <div style={{ fontSize: 13, color: ink, lineHeight: 1.6, display: "grid", gap: 10 }}>
