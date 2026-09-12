@@ -137,6 +137,11 @@ function normalizeGroup(g) {
   if (!g) return g;
   return {
     ...g,
+    // "courses" (the default) is a normal preference-ranking group; "team" is a
+    // completely different shape — students request to join by code instead of ranking
+    // anything, a teacher accepts/declines them in the group's own Mailbox tab, and
+    // accepted students land on its Students tab. No courses, logic, or results apply.
+    mode: g.mode || "courses",
     courses: g.courses || g.clubs || [],
     status: g.status || "active",
     resultsFinalized: !!g.resultsFinalized,
@@ -1975,6 +1980,10 @@ export default function App() {
                 setActiveCode(code);
                 setView("teacher-group");
               }}
+              onOpenTeamGroup={(code) => {
+                setActiveCode(code);
+                setView("teacher-team-group");
+              }}
               onOpenGrid={(code) => {
                 setActiveCode(code);
                 setView("teacher-grid");
@@ -1992,6 +2001,13 @@ export default function App() {
           </>
         )}
 
+        {view === "teacher-team-group" && user && activeCode && (
+          <>
+            <TopBar user={user} onLogout={logout} onBack={() => setView("teacher-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TeamGroupEditor code={activeCode} />
+          </>
+        )}
+
         {view === "teacher-grid" && user && activeCode && (
           <>
             <TopBar user={user} onLogout={logout} onBack={() => setView("teacher-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
@@ -2004,9 +2020,9 @@ export default function App() {
             <TopBar user={user} onLogout={logout} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <StudentHome
               user={user}
-              onJoined={(code) => {
+              onJoined={(code, mode) => {
                 setActiveCode(code);
-                setView("student-survey");
+                setView(mode === "team" ? "student-team-request" : "student-survey");
               }}
               showTutorial={!adminUser && !user.tutorialSeen}
               onTutorialDone={markTutorialSeen}
@@ -2018,6 +2034,13 @@ export default function App() {
           <>
             <TopBar user={user} onLogout={logout} onBack={() => setView("student-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
             <StudentSurvey code={activeCode} user={user} onDone={() => setView("student-done")} />
+          </>
+        )}
+
+        {view === "student-team-request" && user && activeCode && (
+          <>
+            <TopBar user={user} onLogout={logout} onBack={() => setView("student-home")} onNameChange={updateUserName} onPasswordChange={updateUserPassword} onReturnToAdmin={adminUser ? returnToAdmin : undefined} />
+            <TeamJoinScreen code={activeCode} user={user} onDone={() => setView("student-home")} />
           </>
         )}
 
@@ -2626,7 +2649,9 @@ function PriorityBadge({ scores, courseName }) {
 // a teacher's soft-deleted group once its undo window expires.
 async function permanentlyDeleteGroup(group) {
   const subKeys = await storeList(`submission:${group.code}:`, true);
-  await Promise.all(subKeys.map((k) => storeDelete(k, true)));
+  const teamRequestKeys = await storeList(`team-request:${group.code}:`, true);
+  const teamMemberKeys = await storeList(`team-member:${group.code}:`, true);
+  await Promise.all([...subKeys, ...teamRequestKeys, ...teamMemberKeys].map((k) => storeDelete(k, true)));
 
   if (group.teacherEmail) {
     const tgKey = `teacher-groups:${safeKey(group.teacherEmail)}`;
@@ -4279,7 +4304,7 @@ function TabBadge({ count }) {
   );
 }
 
-function TeacherHome({ user, onOpenGroup, onOpenGrid, showTutorial, onTutorialDone }) {
+function TeacherHome({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup, showTutorial, onTutorialDone }) {
   const [subTab, setSubTab] = useState("groups");
   const [pendingCount, setPendingCount] = useState(0);
   const [unreadMessages, setUnreadMessages] = useState(0);
@@ -4328,7 +4353,7 @@ function TeacherHome({ user, onOpenGroup, onOpenGrid, showTutorial, onTutorialDo
         />
       </div>
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
-        {subTab === "groups" && <TeacherDashboard user={user} onOpenGroup={onOpenGroup} onOpenGrid={onOpenGrid} />}
+        {subTab === "groups" && <TeacherDashboard user={user} onOpenGroup={onOpenGroup} onOpenGrid={onOpenGrid} onOpenTeamGroup={onOpenTeamGroup} />}
         {subTab === "mailbox" && <Mailbox user={user} onResolved={refreshPending} />}
         {subTab === "contact" && <ContactAdmin user={user} onViewed={refreshUnreadMessages} />}
       </div>
@@ -4542,7 +4567,7 @@ function Mailbox({ user, onResolved }) {
   );
 }
 
-function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
+function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
   const [chains, setChains] = useState(null); // [{...chain, groups: [group,...]}]
   const [standalone, setStandalone] = useState([]);
   const [creating, setCreating] = useState(false);
@@ -4573,8 +4598,14 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
     const groupObjs = await Promise.all(
       groupCodes.map(async (code) => {
         const g = normalizeGroup(await storeGet(`group:${code}`, true));
+        if (!g) return null;
+        if (g.mode === "team") {
+          const memberKeys = await storeList(`team-member:${code}:`, true);
+          const reqKeys = await storeList(`team-request:${code}:`, true);
+          return { ...g, studentCount: memberKeys.length, pendingRequestCount: reqKeys.length };
+        }
         const subs = await storeList(`submission:${code}:`, true);
-        return g ? { ...g, studentCount: subs.length } : null;
+        return { ...g, studentCount: subs.length };
       })
     );
 
@@ -4668,6 +4699,22 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
     onOpenGroup(code);
   };
 
+  // Team groups skip courses/logic/results entirely — no series support either, since
+  // "carry priority across years" doesn't mean anything without ranked choices.
+  const createTeamGroup = async () => {
+    if (!newName.trim()) return;
+    setBusy(true);
+    let code = genCode();
+    while (await storeGet(`group:${code}`, true)) code = genCode();
+    const group = { code, teacherEmail: user.email, name: newName.trim(), mode: "team", chainId: null, status: "draft", createdAt: Date.now() };
+    await storeSet(`group:${code}`, group, true);
+    await addGroupCode(code);
+    setBusy(false);
+    resetCreate();
+    load();
+    onOpenTeamGroup(code);
+  };
+
   const createSeriesAndGroup = async () => {
     if (!seriesName.trim() || !yearLabel.trim()) return;
     setBusy(true);
@@ -4727,6 +4774,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
       code,
       teacherEmail: user.email,
       name: `${g.name} (Copy)`,
+      mode: g.mode || "courses",
       chainId: null, // duplicates start standalone, even if the original was in a series
       courses: newCourses,
       results: null,
@@ -4737,12 +4785,15 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
     };
     await storeSet(`group:${code}`, newGroup, true);
     await addGroupCode(code);
-    // carry over the original's logic settings as a starting point
-    const settings = await loadLogicSettingsForGroup(g);
-    await saveLogicSettingsForGroup(newGroup, settings);
+    if (g.mode !== "team") {
+      // carry over the original's logic settings as a starting point — meaningless for
+      // a team group, which has no courses or assignment logic to carry.
+      const settings = await loadLogicSettingsForGroup(g);
+      await saveLogicSettingsForGroup(newGroup, settings);
+    }
     setDuplicating(null);
     load();
-    onOpenGroup(code);
+    (g.mode === "team" ? onOpenTeamGroup : onOpenGroup)(code);
   };
 
   // ---------- drag to form / extend a series ----------
@@ -4986,70 +5037,99 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
                 </div>
               )}
               <div style={{ display: "grid", gap: 8 }}>
-                {standalone.map((g) => (
-                  <div
-                    key={g.code}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => onOpenGroup(g.code)}
-                    onKeyDown={(e) => e.key === "Enter" && onOpenGroup(g.code)}
-                    {...dragHandlers(g)}
-                    style={{
-                      textAlign: "left",
-                      background: dragOverCode === g.code ? goldSoft : "#fff",
-                      border: `1px solid ${dragOverCode === g.code ? gold : line}`,
-                      borderRadius: 9,
-                      padding: "14px 16px",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      cursor: "grab",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 700 }}>
-                        {g.name} <span style={{ fontWeight: 400, color: inkSoft, fontSize: 14 }}>({g.studentCount})</span>
+                {standalone.map((g) => {
+                  const isTeam = g.mode === "team";
+                  const openThisGroup = () => (isTeam ? onOpenTeamGroup : onOpenGroup)(g.code);
+                  return (
+                    <div
+                      key={g.code}
+                      role="button"
+                      tabIndex={0}
+                      onClick={openThisGroup}
+                      onKeyDown={(e) => e.key === "Enter" && openThisGroup()}
+                      {...(isTeam ? {} : dragHandlers(g))}
+                      style={{
+                        textAlign: "left",
+                        background: dragOverCode === g.code ? goldSoft : "#fff",
+                        border: `1px solid ${dragOverCode === g.code ? gold : line}`,
+                        borderRadius: 9,
+                        padding: "14px 16px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        cursor: isTeam ? "pointer" : "grab",
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 700 }}>
+                          {g.name} <span style={{ fontWeight: 400, color: inkSoft, fontSize: 14 }}>({g.studentCount})</span>
+                          {isTeam && (
+                            <span
+                              style={{
+                                fontFamily: mono,
+                                fontSize: 9.5,
+                                fontWeight: 700,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.5,
+                                padding: "2px 6px",
+                                borderRadius: 4,
+                                background: greenSoft,
+                                color: green,
+                                marginLeft: 8,
+                                verticalAlign: "middle",
+                              }}
+                            >
+                              Team
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>
+                          {isTeam
+                            ? `${g.studentCount} member${g.studentCount === 1 ? "" : "s"} · ${g.pendingRequestCount || 0} pending request${
+                                (g.pendingRequestCount || 0) === 1 ? "" : "s"
+                              }`
+                            : `${g.courses.length} courses · ${g.studentCount} responses`}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>
-                        {g.courses.length} courses · {g.studentCount} responses
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        {!isTeam && (
+                          <IconBtn
+                            title="View responses grid (read-only)"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenGrid?.(g.code);
+                            }}
+                          >
+                            <LayoutGrid size={13} />
+                          </IconBtn>
+                        )}
+                        <IconBtn
+                          title="Duplicate group"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            duplicateGroup(g);
+                          }}
+                          disabled={duplicating === g.code}
+                        >
+                          <Copy size={13} />
+                        </IconBtn>
+                        <IconBtn
+                          tone="clay"
+                          title="Delete group"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDelete(g);
+                          }}
+                        >
+                          <Trash2 size={13} />
+                        </IconBtn>
+                        <div style={{ fontFamily: mono, fontWeight: 700, fontSize: 15, letterSpacing: 2, background: goldSoft, color: gold, padding: "6px 12px", borderRadius: 6 }}>
+                          {g.code}
+                        </div>
                       </div>
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <IconBtn
-                        title="View responses grid (read-only)"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenGrid?.(g.code);
-                        }}
-                      >
-                        <LayoutGrid size={13} />
-                      </IconBtn>
-                      <IconBtn
-                        title="Duplicate group"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          duplicateGroup(g);
-                        }}
-                        disabled={duplicating === g.code}
-                      >
-                        <Copy size={13} />
-                      </IconBtn>
-                      <IconBtn
-                        tone="clay"
-                        title="Delete group"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setConfirmDelete(g);
-                        }}
-                      >
-                        <Trash2 size={13} />
-                      </IconBtn>
-                      <div style={{ fontFamily: mono, fontWeight: 700, fontSize: 15, letterSpacing: 2, background: goldSoft, color: gold, padding: "6px 12px", borderRadius: 6 }}>
-                        {g.code}
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -5128,12 +5208,24 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
               {modeBtn("standalone", "Standalone")}
               {modeBtn("new-series", "Start a series")}
               {modeBtn("existing-series", "Add to a series")}
+              {modeBtn("team", "Team mode")}
             </div>
 
             {createMode === "standalone" && (
               <Field label="Group name">
                 <input style={inputStyle} placeholder="e.g. 5th Period Courses" value={newName} onChange={(e) => setNewName(e.target.value)} />
               </Field>
+            )}
+
+            {createMode === "team" && (
+              <>
+                <p style={{ fontSize: 12, color: inkSoft, marginTop: -4, marginBottom: 10 }}>
+                  Students request to join by code instead of ranking courses — you accept or decline each request from the group's Mailbox tab.
+                </p>
+                <Field label="Group name">
+                  <input style={inputStyle} placeholder="e.g. Science Fair Teams" value={newName} onChange={(e) => setNewName(e.target.value)} />
+                </Field>
+              </>
             )}
 
             {createMode === "new-series" && (
@@ -5167,10 +5259,19 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid }) {
 
             <div style={{ display: "flex", gap: 8 }}>
               <Btn
-                onClick={createMode === "standalone" ? createStandalone : createMode === "new-series" ? createSeriesAndGroup : addToExistingSeries}
+                onClick={
+                  createMode === "standalone"
+                    ? createStandalone
+                    : createMode === "new-series"
+                    ? createSeriesAndGroup
+                    : createMode === "team"
+                    ? createTeamGroup
+                    : addToExistingSeries
+                }
                 disabled={
                   busy ||
                   (createMode === "standalone" && !newName.trim()) ||
+                  (createMode === "team" && !newName.trim()) ||
                   (createMode === "new-series" && (!seriesName.trim() || !yearLabel.trim())) ||
                   (createMode === "existing-series" && (!existingChainId || !yearLabel.trim()))
                 }
@@ -6743,6 +6844,261 @@ function GroupEditor({ code, onOpenGrid }) {
   );
 }
 
+// ---------------- TEAM GROUP EDITOR ----------------
+// A team-mode group is a different shape of group entirely from a normal course-ranking
+// group: no courses, no preference logic, no assignment run. Students request to join by
+// code; the teacher reviews requests in this group's own Mailbox tab (separate from the
+// cross-group switch-request Mailbox on Teacher Home) and checks students in or out with
+// checkboxes; accepted students land on the Students tab. Splitting those accepted
+// students into actual teams is a later phase — this only gets them enrolled.
+function TeamGroupEditor({ code }) {
+  const [group, setGroup] = useState(null);
+  const [tab, setTab] = useState("mailbox");
+  const [requests, setRequests] = useState([]);
+  const [members, setMembers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(new Set());
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const g = normalizeGroup(await storeGet(`group:${code}`, true));
+    setGroup(g);
+    const reqKeys = await storeList(`team-request:${code}:`, true);
+    const reqs = (await Promise.all(reqKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    reqs.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    setRequests(reqs);
+    const memberKeys = await storeList(`team-member:${code}:`, true);
+    const mems = (await Promise.all(memberKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    mems.sort((a, b) => a.name.localeCompare(b.name));
+    setMembers(mems);
+    setSelected(new Set());
+    setLoading(false);
+  }, [code]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const updateStatus = async (status) => {
+    const updated = { ...group, status };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
+  };
+
+  const toggle = (id) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  const toggleAll = () => {
+    const ids = requests.map((r) => r.id);
+    setSelected((prev) => (ids.length > 0 && ids.every((id) => prev.has(id)) ? new Set() : new Set(ids)));
+  };
+
+  const finishUp = async (msg) => {
+    setBusy(false);
+    setMessage(msg);
+    await load();
+  };
+
+  const acceptSelected = async () => {
+    if (selected.size === 0) return;
+    setBusy(true);
+    const chosen = requests.filter((r) => selected.has(r.id));
+    await Promise.all(
+      chosen.map(async (r) => {
+        await storeSet(`team-member:${code}:${r.id}`, { id: r.id, name: r.name, email: r.email, joinedAt: Date.now() }, true);
+        await storeDelete(`team-request:${code}:${r.id}`, true);
+      })
+    );
+    await finishUp(`Accepted ${chosen.length} student${chosen.length === 1 ? "" : "s"}.`);
+  };
+
+  const declineSelected = async () => {
+    if (selected.size === 0) return;
+    setBusy(true);
+    const chosen = requests.filter((r) => selected.has(r.id));
+    await Promise.all(chosen.map((r) => storeDelete(`team-request:${code}:${r.id}`, true)));
+    await finishUp(`Declined ${chosen.length} request${chosen.length === 1 ? "" : "s"}.`);
+  };
+
+  // A removed student's request record is gone, not marked "declined" anywhere, so they
+  // can simply send a fresh request later if this was a mistake — same as a course-mode
+  // student withdrawing and being able to rejoin with the code.
+  const removeMember = async (studentId) => {
+    await storeDelete(`team-member:${code}:${studentId}`, true);
+    setMembers((prev) => prev.filter((m) => m.id !== studentId));
+  };
+
+  if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
+
+  return (
+    <div>
+      <Header eyebrow="Team group" title={group.name} />
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          background: goldSoft,
+          border: `1px solid ${line}`,
+          borderRadius: 9,
+          padding: "10px 14px",
+          marginBottom: 18,
+        }}
+      >
+        <div style={{ fontSize: 12.5, color: inkSoft }}>Share this code with students so they can request to join</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontFamily: mono, fontWeight: 700, fontSize: 18, letterSpacing: 3, color: gold }}>{code}</span>
+          <IconBtn
+            tone="green"
+            onClick={() => {
+              navigator.clipboard?.writeText(code);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            }}
+          >
+            <Copy size={13} /> {copied ? "Copied" : "Copy"}
+          </IconBtn>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          background: "#fff",
+          border: `1px solid ${line}`,
+          borderRadius: 9,
+          padding: "10px 14px",
+          marginBottom: 18,
+          gap: 10,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              fontFamily: mono,
+              fontSize: 11,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              padding: "3px 9px",
+              borderRadius: 5,
+              background: group.status === "active" ? greenSoft : "#E4E9F1",
+              color: group.status === "active" ? green : inkSoft,
+            }}
+          >
+            {group.status === "active" ? "Active" : "Draft"}
+          </span>
+          <span style={{ fontSize: 12.5, color: inkSoft }}>
+            {group.status === "active" ? "Students can request to join." : "Students can't request to join until this is activated."}
+          </span>
+        </div>
+        {group.status !== "active" && (
+          <Btn onClick={() => updateStatus("active")}>
+            <Play size={14} /> Activate Group
+          </Btn>
+        )}
+      </div>
+
+      {message && (
+        <div style={{ background: greenSoft, borderRadius: 8, padding: "9px 12px", marginBottom: 14, fontSize: 12.5, color: green, display: "flex", justifyContent: "space-between" }}>
+          <span>{message}</span>
+          <button onClick={() => setMessage("")} style={{ background: "none", border: "none", color: green, cursor: "pointer" }}>
+            <X size={13} />
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 4, borderBottom: `1px solid ${line}` }}>
+        <FolderTab
+          active={tab === "mailbox"}
+          onClick={() => setTab("mailbox")}
+          icon={Mail}
+          label={
+            <span style={{ position: "relative" }}>
+              Mailbox
+              <TabBadge count={requests.length} />
+            </span>
+          }
+        />
+        <FolderTab active={tab === "students"} onClick={() => setTab("students")} icon={Users} label={`Students (${members.length})`} />
+      </div>
+
+      <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
+        {tab === "mailbox" && (
+          <div>
+            <p style={{ fontSize: 12.5, color: inkSoft, margin: "0 0 12px" }}>
+              Requests from students who entered this group's code. Accept to add them to the Students list, or decline to remove the request.
+            </p>
+            {requests.length === 0 ? (
+              <p style={{ color: inkSoft, fontSize: 13 }}>No pending requests.</p>
+            ) : (
+              <>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
+                  <IconBtn onClick={toggleAll}>
+                    <CheckSquare size={13} /> {requests.every((r) => selected.has(r.id)) ? "Deselect all" : "Select all"}
+                  </IconBtn>
+                  <IconBtn tone="green" onClick={acceptSelected} disabled={busy || selected.size === 0}>
+                    <Check size={13} /> Accept
+                  </IconBtn>
+                  <IconBtn tone="clay" onClick={declineSelected} disabled={busy || selected.size === 0}>
+                    <X size={13} /> Decline
+                  </IconBtn>
+                  {selected.size > 0 && <span style={{ fontSize: 12, color: inkSoft }}>{selected.size} selected</span>}
+                </div>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {requests.map((r) => (
+                    <div
+                      key={r.id}
+                      style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13 }}
+                    >
+                      <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggle(r.id)} style={{ width: 15, height: 15, cursor: "pointer" }} />
+                      <span style={{ fontWeight: 600, flex: 1 }}>{r.name}</span>
+                      {r.email && <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{r.email}</span>}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {tab === "students" && (
+          <div>
+            <p style={{ fontSize: 12.5, color: inkSoft, margin: "0 0 12px" }}>Students accepted into this team.</p>
+            {members.length === 0 ? (
+              <p style={{ color: inkSoft, fontSize: 13 }}>No students yet — accept requests from the Mailbox tab.</p>
+            ) : (
+              <div style={{ display: "grid", gap: 8 }}>
+                {members.map((m) => (
+                  <div
+                    key={m.id}
+                    style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}
+                  >
+                    <span style={{ fontWeight: 600, flex: 1 }}>{m.name}</span>
+                    {m.email && <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{m.email}</span>}
+                    <IconBtn tone="clay" onClick={() => removeMember(m.id)} title="Remove from group">
+                      <X size={13} />
+                    </IconBtn>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ---------------- STUDENT HOME ----------------
 // Lightweight, read-only count of published results this student hasn't seen yet —
 // used for the notification dot, kept separate from ActiveGroupsList's own load so
@@ -7136,10 +7492,15 @@ function StudentJoin({ onJoined }) {
     const g = normalizeGroup(await storeGet(`group:${clean}`, true));
     setBusy(false);
     if (!g) return setError("No group found with that code — check it with your teacher.");
+    if (g.mode === "team") {
+      if (g.status === "draft") return setError("This group isn't open for join requests yet — check back once your teacher activates it.");
+      onJoined(clean, g.mode);
+      return;
+    }
     if (g.status === "draft") return setError("This group isn't open for responses yet — check back once your teacher activates it.");
     if (g.status === "published") return setError("This group is no longer accepting responses — check the Active Groups tab for your result.");
     if (g.courses.length < 2) return setError("This group's teacher hasn't finished setting up courses yet — check back soon.");
-    onJoined(clean);
+    onJoined(clean, g.mode);
   };
 
   return (
@@ -7162,6 +7523,94 @@ function StudentJoin({ onJoined }) {
       <Btn onClick={submit} full disabled={busy || !code.trim()}>
         {busy ? "Checking…" : "Continue"}
       </Btn>
+    </div>
+  );
+}
+
+// ---------------- TEAM GROUP: STUDENT JOIN REQUEST ----------------
+// A team-mode group has no survey — a student just asks to join, and waits for their
+// teacher to accept or decline from the group's Mailbox. This screen covers all three
+// states a student can be in for a given team group: not yet requested, pending, or
+// already accepted.
+function TeamJoinScreen({ code, user, onDone }) {
+  const [group, setGroup] = useState(null);
+  const [memberRecord, setMemberRecord] = useState(null);
+  const [requestRecord, setRequestRecord] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const myId = safeKey(user.email);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const g = normalizeGroup(await storeGet(`group:${code}`, true));
+    setGroup(g);
+    setMemberRecord(await storeGet(`team-member:${code}:${myId}`, true));
+    setRequestRecord(await storeGet(`team-request:${code}:${myId}`, true));
+    setLoading(false);
+  }, [code, myId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const requestToJoin = async () => {
+    setBusy(true);
+    await storeSet(`team-request:${code}:${myId}`, { id: myId, name: user.name, email: user.email, createdAt: Date.now() }, true);
+    setBusy(false);
+    load();
+  };
+
+  const cancelRequest = async () => {
+    setBusy(true);
+    await storeDelete(`team-request:${code}:${myId}`, true);
+    setBusy(false);
+    load();
+  };
+
+  if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
+
+  return (
+    <div style={{ maxWidth: 420, margin: "0 auto" }}>
+      <Header eyebrow="Team group" title={group.name} />
+      <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 10, padding: 20 }}>
+        {memberRecord ? (
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: green, fontWeight: 700, fontSize: 15, marginBottom: 10 }}>
+              <Check size={18} /> You're part of this team
+            </div>
+            <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 16 }}>
+              Your teacher accepted your request to join "{group.name}".
+            </p>
+            <Btn onClick={onDone} full>
+              Done
+            </Btn>
+          </div>
+        ) : requestRecord ? (
+          <div>
+            <p style={{ fontSize: 13.5, color: ink, marginBottom: 14 }}>
+              Your request to join is pending — waiting on your teacher to accept it.
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn tone="ghost" onClick={load} disabled={busy}>
+                <RefreshCw size={13} /> Check again
+              </Btn>
+              <Btn tone="clay" onClick={cancelRequest} disabled={busy}>
+                {busy ? "Cancelling…" : "Cancel request"}
+              </Btn>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <p style={{ fontSize: 13.5, color: ink, marginBottom: 16 }}>
+              Send a request to join this team. Your teacher will need to accept it before you're added.
+            </p>
+            <Btn onClick={requestToJoin} full disabled={busy}>
+              {busy ? "Sending…" : "Request to join"}
+            </Btn>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
