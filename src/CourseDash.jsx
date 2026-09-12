@@ -1732,6 +1732,7 @@ function Header({ eyebrow, title, sub }) {
 // to another without stepping back through the admin dashboard each time.
 function TestAccountSidebar({ currentUser, onSwitch }) {
   const [testUsers, setTestUsers] = useState(null);
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     const keys = await storeList("user:", true);
@@ -1743,14 +1744,19 @@ function TestAccountSidebar({ currentUser, onSwitch }) {
     load();
   }, [load]);
 
-  const teachers = (testUsers || []).filter((u) => u.role === "teacher");
-  const students = (testUsers || []).filter((u) => u.role === "student");
+  const q = search.trim().toLowerCase();
+  const matches = (u) => !q || u.name.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q);
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const allTeachers = (testUsers || []).filter((u) => u.role === "teacher");
+  const allStudents = (testUsers || []).filter((u) => u.role === "student");
+  const teachers = allTeachers.filter(matches).sort(byName);
+  const students = allStudents.filter(matches).sort(byName);
 
-  const renderGroup = (title, users) => (
+  const renderGroup = (title, users, hasAny) => (
     <div style={{ marginBottom: 14 }}>
       <div style={{ fontSize: 10.5, fontFamily: mono, letterSpacing: 1, textTransform: "uppercase", color: inkSoft, marginBottom: 6 }}>{title}</div>
       {users.length === 0 ? (
-        <p style={{ color: inkSoft, fontSize: 12, margin: 0 }}>None yet.</p>
+        <p style={{ color: inkSoft, fontSize: 12, margin: 0 }}>{hasAny ? "No matches." : "None yet."}</p>
       ) : (
         <div style={{ display: "grid", gap: 5 }}>
           {users.map((u) => {
@@ -1805,10 +1811,29 @@ function TestAccountSidebar({ currentUser, onSwitch }) {
       {testUsers === null ? (
         <p style={{ color: inkSoft, fontSize: 12 }}>Loading…</p>
       ) : (
-        <div style={{ maxHeight: "calc(100vh - 120px)", overflowY: "auto", paddingRight: 2 }}>
-          {renderGroup("Teachers", teachers)}
-          {renderGroup("Students", students)}
-        </div>
+        <>
+          <div style={{ position: "relative", marginBottom: 10 }}>
+            <Search size={11} style={{ position: "absolute", left: 7, top: "50%", transform: "translateY(-50%)", color: inkSoft }} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search…"
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                border: `1px solid ${line}`,
+                borderRadius: 6,
+                padding: "5px 8px 5px 24px",
+                fontSize: 12,
+                fontFamily: sans,
+              }}
+            />
+          </div>
+          <div style={{ maxHeight: "calc(100vh - 175px)", overflowY: "auto", paddingRight: 2 }}>
+            {renderGroup("Teachers", teachers, allTeachers.length > 0)}
+            {renderGroup("Students", students, allStudents.length > 0)}
+          </div>
+        </>
       )}
     </div>
   );
