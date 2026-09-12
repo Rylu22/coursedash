@@ -141,8 +141,34 @@ function normalizeGroup(g) {
     status: g.status || "active",
     resultsFinalized: !!g.resultsFinalized,
     publishedAt: g.publishedAt || null,
+    publishedResults: g.publishedResults || null,
     extraQuestions: g.extraQuestions || [],
   };
+}
+
+// ---- Published vs. working results ----
+// `results` is the teacher's live working copy — it changes the moment they re-run the
+// assignment, drag someone, or accommodate a switch request. `publishedResults` is the
+// frozen copy students actually see, and only moves when the teacher explicitly uploads
+// or updates results. Keeping them separate means a teacher can rearrange a published
+// group without students watching placements shuffle underneath them mid-edit.
+//
+// Falls back to the live results for groups published before snapshots existed, so those
+// keep showing students exactly what they showed before (the teacher's next load backfills
+// an explicit snapshot).
+function publishedResultsOf(g) {
+  return g?.publishedResults || g?.results || null;
+}
+// Canonical "who is in what" string, ignoring anything students can't see (choice-rank
+// badges, manual flags, the settings snapshot) so cosmetic rewrites of `results` don't
+// masquerade as pending changes.
+function resultsSignature(results) {
+  if (!results) return "";
+  const parts = Object.keys(results.assignments || {})
+    .sort()
+    .map((courseId) => `${courseId}:${(results.assignments[courseId] || []).map((s) => s.id).sort().join(",")}`);
+  parts.push(`unassigned:${(results.unassigned || []).map((s) => s.id).sort().join(",")}`);
+  return parts.join("|");
 }
 
 // Backward-compat: a previous version of manual drag-to-reassign always stored
@@ -5283,15 +5309,23 @@ function GroupEditor({ code, onOpenGrid }) {
       g = { ...g, publishedAt: Date.now() };
       await storeSet(`group:${code}`, g, true);
     }
+    const fixedResults = reconcileManualRanks(g?.results || null);
+    if (g && fixedResults !== g.results) {
+      // Persist the corrected badges so they don't need re-fixing on every load.
+      g = { ...g, results: fixedResults };
+      await storeSet(`group:${code}`, g, true);
+    }
+    // Backward-compat: a group published before results snapshots existed has students
+    // reading its live `results`. Freeze that as the published copy on first load, so
+    // later edits register as pending changes instead of reaching students immediately.
+    if (g && g.status === "published" && !g.publishedResults && g.results) {
+      g = { ...g, publishedResults: g.results };
+      await storeSet(`group:${code}`, g, true);
+    }
     setGroup(g);
     setCourses(g?.courses || []);
     setExtraQuestions(g?.extraQuestions || []);
-    const fixedResults = reconcileManualRanks(g?.results || null);
     setResult(fixedResults);
-    if (g && fixedResults && fixedResults !== g.results) {
-      // Persist the corrected badges so they don't need re-fixing on every load.
-      await storeSet(`group:${code}`, { ...g, results: fixedResults }, true);
-    }
     if (g?.chainId) setChain(await storeGet(`chain:${g.chainId}`, true));
     else setChain(null);
     if (g) setSettings(await loadLogicSettingsForGroup(g));
@@ -5379,16 +5413,40 @@ function GroupEditor({ code, onOpenGrid }) {
   const removeQuestion = (id) => saveQuestions(extraQuestions.filter((q) => q.id !== id));
 
   const updateStatus = async (status) => {
-    const updated = { ...group, courses, extraQuestions, status, publishedAt: status === "published" && !group.publishedAt ? Date.now() : group.publishedAt };
+    const updated = {
+      ...group,
+      courses,
+      extraQuestions,
+      status,
+      publishedAt: status === "published" && !group.publishedAt ? Date.now() : group.publishedAt,
+      // Uploading results is what freezes the copy students read; until then they see nothing.
+      publishedResults: status === "published" ? result : group.publishedResults,
+    };
     setGroup(updated);
     await storeSet(`group:${code}`, updated, true);
+  };
+
+  // Pushes the teacher's current working results out to students, replacing the snapshot
+  // they've been seeing. Clearing seen-result marks re-flags the group as "New" for every
+  // student, so a silent reshuffle doesn't leave them looking at an old placement.
+  const [updatingResults, setUpdatingResults] = useState(false);
+  const publishResultUpdate = async () => {
+    setUpdatingResults(true);
+    const updated = { ...group, courses, extraQuestions, publishedResults: result };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
+    const seenKeys = await storeList(`seen-result:${code}:`, true);
+    await Promise.all(seenKeys.map((k) => storeDelete(k, true)));
+    setUpdatingResults(false);
   };
 
   const [confirmFinalize, setConfirmFinalize] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const finalizeResults = async () => {
     setFinalizing(true);
-    const updated = { ...group, courses, extraQuestions, resultsFinalized: true };
+    // Lock in whatever the teacher is looking at, so the finalized group can never be
+    // frozen showing students something older than the results it locked.
+    const updated = { ...group, courses, extraQuestions, resultsFinalized: true, publishedResults: result };
     setGroup(updated);
     await storeSet(`group:${code}`, updated, true);
     // Any pending switch requests for this group can no longer be acted on — clear them.
@@ -5532,7 +5590,11 @@ function GroupEditor({ code, onOpenGrid }) {
     // numbers stop matching the placement they're supposedly describing.
     const res = { ...assignStudents(courses, students, priority, settings), settingsSnapshot: settings };
     setResult(res);
-    await storeSet(`group:${code}`, { ...group, courses, extraQuestions, results: res }, true);
+    // Keep `group` in step with what was just written — later saves spread `...group`,
+    // so leaving its `results` stale here would silently roll this run back.
+    const updated = { ...group, courses, extraQuestions, results: res };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
     setTab("results");
   };
   // Falls back to the live settings for a result saved before this snapshot existed.
@@ -5573,11 +5635,21 @@ function GroupEditor({ code, onOpenGrid }) {
     const nextResult = moveStudentInResults(result, studentId, fromCourseId, toCourseId);
     if (nextResult === result) return; // no-op: same course, or student not found
     setResult(nextResult);
-    await storeSet(`group:${code}`, { ...group, courses, extraQuestions, results: nextResult }, true);
+    const updated = { ...group, courses, extraQuestions, results: nextResult };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
   };
 
   const rankColor = { 1: gold, 2: green, 3: clay };
   const rankSoft = { 1: goldSoft, 2: greenSoft, 3: claySoft };
+
+  // Compared against the live `result` state rather than group.results, so the button
+  // reacts the instant a drag or re-run lands rather than a save round-trip later.
+  const resultsAwaitingUpdate =
+    group?.status === "published" &&
+    !group.resultsFinalized &&
+    !!group.publishedResults &&
+    resultsSignature(result) !== resultsSignature(group.publishedResults);
 
   if (!group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
 
@@ -5650,11 +5722,15 @@ function GroupEditor({ code, onOpenGrid }) {
           >
             {group.resultsFinalized ? "Finalized" : group.status === "active" ? "Active" : group.status === "published" ? "Results published" : "Draft"}
           </span>
-          <span style={{ fontSize: 12.5, color: inkSoft }}>
+          <span style={{ fontSize: 12.5, color: resultsAwaitingUpdate ? gold : inkSoft }}>
             {group.resultsFinalized && "Results are locked — no further edits or requests are possible."}
             {!group.resultsFinalized && group.status === "draft" && "Students can't join or respond until this is activated."}
             {!group.resultsFinalized && group.status === "active" && "Students can join and submit responses."}
-            {!group.resultsFinalized && group.status === "published" && "Survey closed — students can see their result in Active Groups."}
+            {!group.resultsFinalized &&
+              group.status === "published" &&
+              (resultsAwaitingUpdate
+                ? "You've changed these results since publishing — students still see the previous version until you update."
+                : "Survey closed — students can see their result in Active Groups.")}
           </span>
         </div>
         {!group.resultsFinalized && group.status === "draft" && (
@@ -5667,7 +5743,14 @@ function GroupEditor({ code, onOpenGrid }) {
             <Upload size={14} /> Upload Results
           </Btn>
         )}
-        {!group.resultsFinalized && group.status === "published" && (
+        {/* Takes the Finalize slot while changes are pending, so results can't be locked
+            in a state students were never shown. Updating clears it and Finalize returns. */}
+        {!group.resultsFinalized && group.status === "published" && resultsAwaitingUpdate && (
+          <Btn tone="green" onClick={publishResultUpdate} disabled={updatingResults}>
+            <Upload size={14} /> {updatingResults ? "Updating…" : "Update Results"}
+          </Btn>
+        )}
+        {!group.resultsFinalized && group.status === "published" && !resultsAwaitingUpdate && (
           <Btn tone="clay" onClick={() => setConfirmFinalize(true)}>
             <Lock size={14} /> Finalize Results
           </Btn>
@@ -6762,7 +6845,7 @@ async function computeSwitchLikelihood(g, targetCourseId) {
   subs.forEach((s) => {
     subsById[s.id] = s;
   });
-  const assignments = g.results?.assignments || {};
+  const assignments = publishedResultsOf(g)?.assignments || {};
   return (g.courses || [])
     .filter((c) => c.id !== targetCourseId)
     .map((c) => {
@@ -6831,13 +6914,16 @@ function ActiveGroupsList({ user, onEditGroup, onViewed }) {
   };
 
   const myResult = (g) => {
-    if (!g.results) return null;
+    // The published snapshot, never the teacher's working copy — mid-edit placements
+    // stay invisible until the teacher uploads or updates results.
+    const published = publishedResultsOf(g);
+    if (!published) return null;
     const myId = safeKey(user.email);
-    for (const [courseId, list] of Object.entries(g.results.assignments)) {
+    for (const [courseId, list] of Object.entries(published.assignments)) {
       const found = list.find((s) => s.id === myId);
       if (found) return { courseId, courseName: (g.courses || []).find((c) => c.id === courseId)?.name || "(removed course)" };
     }
-    if (g.results.unassigned?.some((s) => s.id === myId)) return { courseId: null, courseName: null };
+    if (published.unassigned?.some((s) => s.id === myId)) return { courseId: null, courseName: null };
     return null;
   };
 
