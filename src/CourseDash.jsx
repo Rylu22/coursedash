@@ -4596,7 +4596,8 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
   const [chains, setChains] = useState(null); // [{...chain, groups: [group,...]}]
   const [standalone, setStandalone] = useState([]);
   const [creating, setCreating] = useState(false);
-  const [createMode, setCreateMode] = useState("standalone"); // standalone | new-series | existing-series
+  const [groupKind, setGroupKind] = useState("courses"); // courses | team
+  const [createMode, setCreateMode] = useState("standalone"); // standalone | new-series | existing-series (courses kind only)
   const [newName, setNewName] = useState("");
   const [seriesName, setSeriesName] = useState("");
   const [existingChainId, setExistingChainId] = useState("");
@@ -4782,6 +4783,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
 
   const resetCreate = () => {
     setCreating(false);
+    setGroupKind("courses");
     setCreateMode("standalone");
     setNewName("");
     setSeriesName("");
@@ -4908,19 +4910,42 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
     },
   });
 
+  // Top-level choice between a normal course-ranking group and a team-request group.
+  const kindBtn = (kind, label) => (
+    <button
+      type="button"
+      onClick={() => setGroupKind(kind)}
+      style={{
+        flex: 1,
+        padding: "8px 4px",
+        borderRadius: 7,
+        border: `1px solid ${groupKind === kind ? green : line}`,
+        background: groupKind === kind ? greenSoft : "#fff",
+        color: groupKind === kind ? green : inkSoft,
+        fontWeight: 700,
+        fontSize: 12.5,
+        fontFamily: sans,
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
+  // Second-tier choice, only shown once "Courses Mode" is picked — smaller since it's
+  // one level down from the kind buttons above it.
   const modeBtn = (mode, label) => (
     <button
       type="button"
       onClick={() => setCreateMode(mode)}
       style={{
         flex: 1,
-        padding: "8px 4px",
-        borderRadius: 7,
+        padding: "6px 4px",
+        borderRadius: 6,
         border: `1px solid ${createMode === mode ? green : line}`,
         background: createMode === mode ? greenSoft : "#fff",
         color: createMode === mode ? green : inkSoft,
         fontWeight: 700,
-        fontSize: 12.5,
+        fontSize: 11.5,
         fontFamily: sans,
         cursor: "pointer",
       }}
@@ -5230,19 +5255,25 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
         ) : (
           <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: 14 }}>
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-              {modeBtn("standalone", "Standalone")}
-              {modeBtn("new-series", "Start a series")}
-              {modeBtn("existing-series", "Add to a series")}
-              {modeBtn("team", "Team mode")}
+              {kindBtn("courses", "Courses Mode")}
+              {kindBtn("team", "Team Mode")}
             </div>
 
-            {createMode === "standalone" && (
+            {groupKind === "courses" && (
+              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                {modeBtn("standalone", "Standalone")}
+                {modeBtn("new-series", "Start a series")}
+                {modeBtn("existing-series", "Add to a series")}
+              </div>
+            )}
+
+            {groupKind === "courses" && createMode === "standalone" && (
               <Field label="Group name">
                 <input style={inputStyle} placeholder="e.g. 5th Period Courses" value={newName} onChange={(e) => setNewName(e.target.value)} />
               </Field>
             )}
 
-            {createMode === "team" && (
+            {groupKind === "team" && (
               <>
                 <p style={{ fontSize: 12, color: inkSoft, marginTop: -4, marginBottom: 10 }}>
                   Students request to join by code instead of ranking courses — you accept or decline each request from the group's Mailbox tab.
@@ -5253,7 +5284,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
               </>
             )}
 
-            {createMode === "new-series" && (
+            {groupKind === "courses" && createMode === "new-series" && (
               <>
                 <Field label="Series name">
                   <input style={inputStyle} placeholder="e.g. Chess Course Roster" value={seriesName} onChange={(e) => setSeriesName(e.target.value)} />
@@ -5264,7 +5295,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
               </>
             )}
 
-            {createMode === "existing-series" && (
+            {groupKind === "courses" && createMode === "existing-series" && (
               <>
                 <Field label="Series">
                   <select style={inputStyle} value={existingChainId} onChange={(e) => setExistingChainId(e.target.value)}>
@@ -5285,20 +5316,20 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
             <div style={{ display: "flex", gap: 8 }}>
               <Btn
                 onClick={
-                  createMode === "standalone"
+                  groupKind === "team"
+                    ? createTeamGroup
+                    : createMode === "standalone"
                     ? createStandalone
                     : createMode === "new-series"
                     ? createSeriesAndGroup
-                    : createMode === "team"
-                    ? createTeamGroup
                     : addToExistingSeries
                 }
                 disabled={
                   busy ||
-                  (createMode === "standalone" && !newName.trim()) ||
-                  (createMode === "team" && !newName.trim()) ||
-                  (createMode === "new-series" && (!seriesName.trim() || !yearLabel.trim())) ||
-                  (createMode === "existing-series" && (!existingChainId || !yearLabel.trim()))
+                  (groupKind === "team" && !newName.trim()) ||
+                  (groupKind === "courses" && createMode === "standalone" && !newName.trim()) ||
+                  (groupKind === "courses" && createMode === "new-series" && (!seriesName.trim() || !yearLabel.trim())) ||
+                  (groupKind === "courses" && createMode === "existing-series" && (!existingChainId || !yearLabel.trim()))
                 }
               >
                 {busy ? "Creating…" : "Create"}
