@@ -345,6 +345,37 @@ async function saveLogicSettingsForGroup(group, next) {
   await storeSet(logicSettingsKey(group), next, true);
 }
 
+// ---- Team mode: how to split accepted members into teams ----
+// A separate settings shape and storage key from the course-mode logic settings above —
+// team groups don't support series, so this is always keyed by the group's own code.
+// "even" only needs a team count; sizes are computed on the fly so they always track the
+// current member count. "custom" persists an explicit size per team, since those are a
+// teacher's deliberate choice rather than something to recompute automatically.
+const DEFAULT_TEAM_SPLIT_SETTINGS = {
+  splitMode: "even", // "even" | "custom"
+  teamCount: 2,
+  customSizes: [], // "custom" mode only: one entry per team, in order
+};
+function teamSplitSettingsKey(group) {
+  return `team-split-settings:${group.code}`;
+}
+async function loadTeamSplitSettings(group) {
+  const s = await storeGet(teamSplitSettingsKey(group), true);
+  return { ...DEFAULT_TEAM_SPLIT_SETTINGS, ...(s || {}) };
+}
+async function saveTeamSplitSettings(group, next) {
+  await storeSet(teamSplitSettingsKey(group), next, true);
+}
+// Splits `total` members into `teamCount` teams as evenly as possible: every team gets
+// at least floor(total/teamCount), and the remainder is handed out one extra member each
+// to the first few teams — so sizes never differ by more than 1.
+function evenSplitSizes(total, teamCount) {
+  if (teamCount <= 0) return [];
+  const base = Math.floor(total / teamCount);
+  const remainder = total % teamCount;
+  return Array.from({ length: teamCount }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
 // Scales each course's `target` proportionally so the capacities sum to exactly
 // `totalStudents`, using largest-remainder apportionment (Hamilton method) so the
 // rounding is as fair as possible. E.g. targets 1,1,2 with 20 students → 5,5,10.
@@ -2725,6 +2756,7 @@ async function permanentlyDeleteGroup(group) {
     }
   } else {
     await storeDelete(`group-settings:${group.code}`, true);
+    await storeDelete(`team-split-settings:${group.code}`, true);
   }
 
   await storeDelete(`group:${group.code}`, true);
@@ -7279,6 +7311,7 @@ function TeamGroupEditor({ code }) {
   const [requests, setRequests] = useState([]);
   const [members, setMembers] = useState([]);
   const [pickedIds, setPickedIds] = useState(new Set()); // member ids who've submitted their 3 groupmate picks
+  const [settings, setSettings] = useState(DEFAULT_TEAM_SPLIT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(new Set());
   const [busy, setBusy] = useState(false);
@@ -7301,6 +7334,7 @@ function TeamGroupEditor({ code }) {
     // Keys are `team-picks:<code>:<studentId>` — the id is everything after that prefix,
     // which is enough to know who's submitted without fetching each pick record.
     setPickedIds(new Set(pickKeys.map((k) => k.slice(`team-picks:${code}:`.length))));
+    if (g) setSettings(await loadTeamSplitSettings(g));
     setSelected(new Set());
     setLoading(false);
   }, [code]);
@@ -7319,6 +7353,39 @@ function TeamGroupEditor({ code }) {
     const updated = { ...group, surveyOpen: true };
     setGroup(updated);
     await storeSet(`group:${code}`, updated, true);
+  };
+
+  const updateSplitSetting = async (patch) => {
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    await saveTeamSplitSettings(group, next);
+  };
+  // Resizes a custom-sizes array to exactly `n` entries: extra teams are trimmed off the
+  // end, and any newly-added teams are pre-filled with an even split of whoever's left
+  // over after the teams that already have a size.
+  const resizeCustomSizes = (sizes, n, memberCount) => {
+    const next = sizes.slice(0, n);
+    if (next.length < n) next.push(...evenSplitSizes(Math.max(0, memberCount - next.reduce((sum, v) => sum + v, 0)), n - next.length));
+    return next;
+  };
+  const setCustomTeamCount = (count) => {
+    const n = Math.max(1, Math.round(count) || 1);
+    updateSplitSetting({ teamCount: n, customSizes: resizeCustomSizes(settings.customSizes, n, members.length) });
+  };
+  const setCustomTeamSize = (index, size) => {
+    const next = settings.customSizes.slice();
+    next[index] = Math.max(0, Math.round(size) || 0);
+    updateSplitSetting({ customSizes: next });
+  };
+  // Switching into custom mode for the first time (or after the team count changed
+  // while on "even") seeds customSizes in the same action that flips the mode, so the
+  // two never fall out of sync from a stale `settings` closure across two calls.
+  const switchSplitMode = (mode) => {
+    if (mode !== "custom" || settings.customSizes.length === settings.teamCount) {
+      updateSplitSetting({ splitMode: mode });
+      return;
+    }
+    updateSplitSetting({ splitMode: mode, customSizes: resizeCustomSizes(settings.customSizes, settings.teamCount, members.length) });
   };
 
   const toggle = (id) =>
@@ -7513,6 +7580,7 @@ function TeamGroupEditor({ code }) {
           }
         />
         <FolderTab active={tab === "students"} onClick={() => setTab("students")} icon={Users} label={`Students (${members.length})`} />
+        <FolderTab active={tab === "logic"} onClick={() => setTab("logic")} icon={Sliders} label="Logic" />
       </div>
 
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
@@ -7589,6 +7657,103 @@ function TeamGroupEditor({ code }) {
                     </IconBtn>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "logic" && (
+          <div>
+            <p style={{ fontSize: 12.5, color: inkSoft, marginTop: -4, marginBottom: 14 }}>
+              Choose how accepted students should be split into teams. This sets up the split — actually running it to place specific students comes later.
+            </p>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              {[
+                { key: "even", label: "Split evenly" },
+                { key: "custom", label: "Custom split" },
+              ].map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => switchSplitMode(opt.key)}
+                  style={{
+                    flex: 1,
+                    padding: "8px 4px",
+                    borderRadius: 7,
+                    border: `1px solid ${settings.splitMode === opt.key ? green : line}`,
+                    background: settings.splitMode === opt.key ? greenSoft : "#fff",
+                    color: settings.splitMode === opt.key ? green : inkSoft,
+                    fontWeight: 700,
+                    fontSize: 12.5,
+                    fontFamily: sans,
+                    cursor: "pointer",
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {settings.splitMode === "even" ? (
+              <div>
+                <Field label="Number of teams">
+                  <input
+                    type="number"
+                    min={1}
+                    value={settings.teamCount}
+                    onChange={(e) => updateSplitSetting({ teamCount: Math.max(1, Math.round(Number(e.target.value)) || 1) })}
+                    style={{ ...inputStyle, width: 100 }}
+                  />
+                </Field>
+                <p style={{ fontSize: 12.5, color: inkSoft, marginTop: -4 }}>
+                  {members.length === 0
+                    ? "No accepted students yet."
+                    : (() => {
+                        const sizes = evenSplitSizes(members.length, settings.teamCount);
+                        const min = Math.min(...sizes);
+                        const max = Math.max(...sizes);
+                        return `${members.length} student${members.length === 1 ? "" : "s"} → ${settings.teamCount} team${
+                          settings.teamCount === 1 ? "" : "s"
+                        } of ${min === max ? min : `${min}–${max}`} each.`;
+                      })()}
+                </p>
+              </div>
+            ) : (
+              <div>
+                <Field label="Number of teams">
+                  <input
+                    type="number"
+                    min={1}
+                    value={settings.teamCount}
+                    onChange={(e) => setCustomTeamCount(Number(e.target.value))}
+                    style={{ ...inputStyle, width: 100 }}
+                  />
+                </Field>
+                <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                  {settings.customSizes.map((size, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 12.5, color: inkSoft, width: 60, flexShrink: 0 }}>Team {i + 1}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={size}
+                        onChange={(e) => setCustomTeamSize(i, Number(e.target.value))}
+                        style={{ ...inputStyle, width: 80 }}
+                      />
+                      <span style={{ fontSize: 12, color: inkSoft }}>student{size === 1 ? "" : "s"}</span>
+                    </div>
+                  ))}
+                </div>
+                {(() => {
+                  const total = settings.customSizes.reduce((sum, v) => sum + v, 0);
+                  const diff = total - members.length;
+                  return (
+                    <p style={{ fontSize: 12.5, marginTop: 10, color: diff === 0 ? green : gold }}>
+                      Teams add up to {total} of {members.length} accepted student{members.length === 1 ? "" : "s"}
+                      {diff === 0 ? " — matches exactly." : diff > 0 ? ` — ${diff} more than you have.` : ` — ${-diff} left unassigned.`}
+                    </p>
+                  );
+                })()}
               </div>
             )}
           </div>
