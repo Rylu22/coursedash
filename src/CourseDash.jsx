@@ -2850,8 +2850,9 @@ function AdminTesting({ onEnterAccount, onOpenQuickFill, onOpenTeamQuickFill }) 
     load();
   };
 
-  const teachers = (testUsers || []).filter((u) => u.role === "teacher");
-  const students = (testUsers || []).filter((u) => u.role === "student");
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const teachers = (testUsers || []).filter((u) => u.role === "teacher").sort(byName);
+  const students = (testUsers || []).filter((u) => u.role === "student").sort(byName);
   const selectedCount = selectedAccounts.size + selectedGroups.size;
 
   return (
@@ -3108,7 +3109,7 @@ function QuickFillGrid({ code }) {
   const courses = group?.courses || [];
   const choiceCount = group ? Math.max(2, Math.min(3, courses.length)) : 3;
   const addedIds = new Set(rows.map((r) => r.studentId));
-  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email)));
+  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email))).sort((a, b) => a.name.localeCompare(b.name));
 
   // Every row-changing action goes through here instead of setRows directly, so it
   // can be undone. Caps history at 50 steps so the stack can't grow unbounded.
@@ -3584,7 +3585,7 @@ function TeamQuickFillGrid({ code }) {
   }, [load]);
 
   const addedIds = new Set(rows.map((r) => r.studentId));
-  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email)));
+  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email))).sort((a, b) => a.name.localeCompare(b.name));
 
   const updateRows = (updater) => {
     const next = typeof updater === "function" ? updater(rows) : updater;
