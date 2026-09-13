@@ -1850,6 +1850,7 @@ export default function App() {
   const [adminUser, setAdminUser] = useState(null); // holds the real admin's record while viewing another account
   const [activeCode, setActiveCode] = useState(null);
   const [quickFillCode, setQuickFillCode] = useState(null); // group code currently open in the admin's quick-fill grid
+  const [teamQuickFillCode, setTeamQuickFillCode] = useState(null); // group code currently open in the admin's team quick-fill grid
   const [checkingSession, setCheckingSession] = useState(true);
 
   const isAdmin = (u) => u?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
@@ -1940,6 +1941,10 @@ export default function App() {
     setQuickFillCode(code);
     setView("admin-quickfill");
   };
+  const openTeamQuickFill = (code) => {
+    setTeamQuickFillCode(code);
+    setView("admin-team-quickfill");
+  };
 
   return (
     <div
@@ -1983,7 +1988,7 @@ export default function App() {
         {view === "admin-dashboard" && user && (
           <>
             <TopBar user={{ ...user, role: "admin" }} onLogout={logout} onNameChange={updateUserName} onPasswordChange={updateUserPassword} />
-            <AdminHome user={user} onEnterAccount={enterAccount} onOpenQuickFill={openQuickFill} />
+            <AdminHome user={user} onEnterAccount={enterAccount} onOpenQuickFill={openQuickFill} onOpenTeamQuickFill={openTeamQuickFill} />
           </>
         )}
 
@@ -1997,6 +2002,19 @@ export default function App() {
               onPasswordChange={updateUserPassword}
             />
             <QuickFillGrid code={quickFillCode} />
+          </>
+        )}
+
+        {view === "admin-team-quickfill" && user && teamQuickFillCode && (
+          <>
+            <TopBar
+              user={{ ...user, role: "admin" }}
+              onLogout={logout}
+              onBack={() => setView("admin-dashboard")}
+              onNameChange={updateUserName}
+              onPasswordChange={updateUserPassword}
+            />
+            <TeamQuickFillGrid code={teamQuickFillCode} />
           </>
         )}
 
@@ -2713,7 +2731,7 @@ async function permanentlyDeleteGroup(group) {
 }
 
 // ---------------- ADMIN HOME (Accounts & Groups / Messages) ----------------
-function AdminHome({ user, onEnterAccount, onOpenQuickFill }) {
+function AdminHome({ user, onEnterAccount, onOpenQuickFill, onOpenTeamQuickFill }) {
   const [subTab, setSubTab] = useState("accounts");
   const [unreadCount, setUnreadCount] = useState(0);
 
@@ -2747,13 +2765,13 @@ function AdminHome({ user, onEnterAccount, onOpenQuickFill }) {
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
         {subTab === "accounts" && <AdminDashboard onEnterAccount={onEnterAccount} />}
         {subTab === "messages" && <AdminMessages adminUser={user} onViewed={refreshUnread} />}
-        {subTab === "testing" && <AdminTesting onEnterAccount={onEnterAccount} onOpenQuickFill={onOpenQuickFill} />}
+        {subTab === "testing" && <AdminTesting onEnterAccount={onEnterAccount} onOpenQuickFill={onOpenQuickFill} onOpenTeamQuickFill={onOpenTeamQuickFill} />}
       </div>
     </div>
   );
 }
 
-function AdminTesting({ onEnterAccount, onOpenQuickFill }) {
+function AdminTesting({ onEnterAccount, onOpenQuickFill, onOpenTeamQuickFill }) {
   const [testUsers, setTestUsers] = useState(null);
   const [testGroups, setTestGroups] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -2921,6 +2939,7 @@ function AdminTesting({ onEnterAccount, onOpenQuickFill }) {
             onToggle={toggleGroup}
             onToggleAll={toggleAllGroups}
             onOpenQuickFill={onOpenQuickFill}
+            onOpenTeamQuickFill={onOpenTeamQuickFill}
             onDelete={(g) => buildConfirmation([], [g.code], `the group "${g.name}" (${g.code})`)}
           />
         </>
@@ -2973,7 +2992,7 @@ function TestAccountGroup({ title, users, selected, onToggle, onToggleAll, onEnt
 
 // Every group belonging to a test teacher, moved here out of the main Accounts &
 // Groups tab so test data stays fully separate from real accounts and groups.
-function TestGroupsSection({ groups, selected, onToggle, onToggleAll, onOpenQuickFill, onDelete }) {
+function TestGroupsSection({ groups, selected, onToggle, onToggleAll, onOpenQuickFill, onOpenTeamQuickFill, onDelete }) {
   return (
     <div>
       <div style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
@@ -2995,7 +3014,16 @@ function TestGroupsSection({ groups, selected, onToggle, onToggleAll, onOpenQuic
               <span style={{ flex: 1, fontWeight: 600 }}>{g.name}</span>
               <span style={{ fontFamily: mono, fontSize: 11, color: gold, background: goldSoft, padding: "2px 7px", borderRadius: 4 }}>{g.code}</span>
               <span style={{ color: inkSoft, fontSize: 12.5 }}>{g.teacherName || g.teacherEmail}</span>
-              <IconBtn tone="ink" title="Quick fill test responses for this group" onClick={() => onOpenQuickFill?.(g.code)}>
+              {g.mode === "team" && (
+                <span style={{ fontFamily: mono, fontSize: 9.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, padding: "2px 6px", borderRadius: 4, background: greenSoft, color: green }}>
+                  Team
+                </span>
+              )}
+              <IconBtn
+                tone="ink"
+                title={g.mode === "team" ? "Quick fill test picks for this team group" : "Quick fill test responses for this group"}
+                onClick={() => (g.mode === "team" ? onOpenTeamQuickFill : onOpenQuickFill)?.(g.code)}
+              >
                 <LayoutGrid size={13} /> Quick fill
               </IconBtn>
               <IconBtn tone="clay" title="Delete group" onClick={() => onDelete(g)}>
@@ -3488,6 +3516,338 @@ function QuickFillGrid({ code }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------- TEAM QUICK FILL GRID (admin testing tool) ----------------
+// The team-mode equivalent of QuickFillGrid: same sidebar layout, undo/redo, and
+// add/remove-row mechanics, but the grid itself is square — both axes are the same
+// roster of test students, since a team-mode "response" is picking 3 of your own
+// teammates rather than ranking courses. Clicking a cell toggles a plain green
+// checkmark (unordered, all three equal) instead of placing a ranked "Choice N" token,
+// and there's no drag — a checkbox has nothing meaningful to drag between cells.
+function TeamQuickFillGrid({ code }) {
+  const [group, setGroup] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [allTestStudents, setAllTestStudents] = useState([]);
+  const [showAddPicker, setShowAddPicker] = useState(false);
+  const [creatingStudent, setCreatingStudent] = useState(false);
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitMessage, setSubmitMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const g = normalizeGroup(await storeGet(`group:${code}`, true));
+    setGroup(g);
+    const userKeys = await storeList("user:", true);
+    const users = (await Promise.all(userKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    const testStudents = users.filter((u) => u.isTest && u.role === "student");
+    setAllTestStudents(testStudents);
+    const testStudentById = {};
+    testStudents.forEach((u) => {
+      testStudentById[safeKey(u.email)] = u;
+    });
+
+    // Prefill rows from any test students already accepted into this team, with
+    // whatever picks they've already submitted, so reopening the tool picks up where
+    // it left off — same as QuickFillGrid does from `submission:` records.
+    const memberKeys = await storeList(`team-member:${code}:`, true);
+    const members = (await Promise.all(memberKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    const pickKeys = await storeList(`team-picks:${code}:`, true);
+    const picksList = (await Promise.all(pickKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    const picksById = {};
+    picksList.forEach((p) => {
+      picksById[p.id] = p;
+    });
+    const existingRows = members
+      .filter((m) => testStudentById[m.id])
+      .map((m) => ({
+        studentId: m.id,
+        name: m.name,
+        email: m.email,
+        picks: picksById[m.id]?.choices || [],
+        createdAt: picksById[m.id]?.createdAt || null,
+        joinedAt: m.joinedAt || null,
+      }));
+    setRows(existingRows);
+    setUndoStack([]);
+    setRedoStack([]);
+    setLoading(false);
+  }, [code]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const addedIds = new Set(rows.map((r) => r.studentId));
+  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email)));
+
+  const updateRows = (updater) => {
+    const next = typeof updater === "function" ? updater(rows) : updater;
+    setUndoStack((prev) => [...prev.slice(-49), rows]);
+    setRedoStack([]);
+    setRows(next);
+  };
+  const undo = () => {
+    if (undoStack.length === 0) return;
+    const prevRows = undoStack[undoStack.length - 1];
+    setUndoStack(undoStack.slice(0, -1));
+    setRedoStack((prev) => [...prev, rows]);
+    setRows(prevRows);
+  };
+  const redo = () => {
+    if (redoStack.length === 0) return;
+    const nextRows = redoStack[redoStack.length - 1];
+    setRedoStack(redoStack.slice(0, -1));
+    setUndoStack((prev) => [...prev, rows]);
+    setRows(nextRows);
+  };
+
+  const addStudentRow = (student) => {
+    const studentId = safeKey(student.email);
+    if (addedIds.has(studentId)) return;
+    updateRows((prev) => [...prev, { studentId, name: student.name, email: student.email, picks: [] }]);
+    setShowAddPicker(false);
+  };
+
+  const addNewStudent = async () => {
+    setCreatingStudent(true);
+    const record = await createTestAccount("student", allTestStudents);
+    setAllTestStudents((prev) => [...prev, record]);
+    addStudentRow(record);
+    setCreatingStudent(false);
+  };
+
+  // Also drops the removed student from everyone else's picks, so no row is left
+  // pointing at a column that no longer exists in the grid.
+  const removeRow = (studentId) =>
+    updateRows((prev) => prev.filter((r) => r.studentId !== studentId).map((r) => ({ ...r, picks: r.picks.filter((id) => id !== studentId) })));
+
+  const togglePick = (rowId, colId) => {
+    if (rowId === colId) return;
+    updateRows((prev) =>
+      prev.map((r) => {
+        if (r.studentId !== rowId) return r;
+        if (r.picks.includes(colId)) return { ...r, picks: r.picks.filter((id) => id !== colId) };
+        if (r.picks.length >= 3) return r;
+        return { ...r, picks: [...r.picks, colId] };
+      })
+    );
+  };
+
+  const rowStatus = (row) => {
+    if (row.picks.length === 0) return "empty";
+    if (row.picks.length === 3) return "full";
+    return "partial";
+  };
+
+  const canSubmit = rows.length > 0 && rows.every((r) => rowStatus(r) !== "partial") && rows.some((r) => rowStatus(r) === "full");
+
+  const submit = async () => {
+    setSubmitting(true);
+    setSubmitMessage("");
+    const fullRows = rows.filter((r) => rowStatus(r) === "full");
+    await Promise.all(
+      fullRows.map(async (r) => {
+        const existingMember = await storeGet(`team-member:${code}:${r.studentId}`, true);
+        await storeSet(`team-member:${code}:${r.studentId}`, { id: r.studentId, name: r.name, email: r.email, joinedAt: existingMember?.joinedAt || Date.now() }, true);
+        await storeSet(`team-picks:${code}:${r.studentId}`, { id: r.studentId, name: r.name, email: r.email, choices: r.picks, createdAt: r.createdAt || Date.now() }, true);
+      })
+    );
+    setSubmitting(false);
+    setSubmitMessage(`Submitted ${fullRows.length} student${fullRows.length === 1 ? "" : "s"}.`);
+    load();
+  };
+
+  if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
+
+  return (
+    <div>
+      <Header
+        eyebrow={group.name}
+        title="Quick fill test picks"
+        sub="Click a cell to check a student in as one of that row's 3 groupmate picks — no ranking, all three count equally. A row needs exactly 3 checks or none before submitting."
+      />
+
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 20 }}>
+        <div
+          style={{
+            width: 200,
+            flexShrink: 0,
+            position: "sticky",
+            top: 20,
+            background: "#fff",
+            border: `1px solid ${line}`,
+            borderRadius: 10,
+            padding: "14px 12px",
+            display: "grid",
+            gap: 14,
+          }}
+        >
+          <p style={{ fontSize: 11, color: inkSoft, margin: 0, display: "flex", alignItems: "flex-start", gap: 5 }}>
+            <GripVertical size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+            Click a cell to check or uncheck a pick. A student can't pick themselves.
+          </p>
+
+          <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, display: "flex", gap: 8 }}>
+            <IconBtn title="Undo" onClick={undo} disabled={undoStack.length === 0}>
+              <Undo2 size={14} />
+            </IconBtn>
+            <IconBtn title="Redo" onClick={redo} disabled={redoStack.length === 0}>
+              <Redo2 size={14} />
+            </IconBtn>
+          </div>
+
+          <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, position: "relative" }}>
+            <Btn tone="ghost" onClick={() => setShowAddPicker((o) => !o)} full>
+              <Plus size={14} /> Add test student
+            </Btn>
+            {showAddPicker && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  right: 0,
+                  marginTop: 6,
+                  zIndex: 20,
+                  background: "#fff",
+                  border: `1px solid ${line}`,
+                  borderRadius: 8,
+                  padding: 10,
+                  boxShadow: "0 4px 14px rgba(19,34,56,0.12)",
+                }}
+              >
+                <Btn onClick={addNewStudent} disabled={creatingStudent} full>
+                  <Plus size={13} /> {creatingStudent ? "Creating…" : "New test student"}
+                </Btn>
+                {availableStudents.length > 0 && (
+                  <div style={{ marginTop: 8, display: "grid", gap: 2, maxHeight: 220, overflowY: "auto" }}>
+                    {availableStudents.map((u) => (
+                      <button
+                        key={u.email}
+                        onClick={() => addStudentRow(u)}
+                        style={{ textAlign: "left", background: "none", border: "none", padding: "6px 6px", fontSize: 13, fontFamily: sans, cursor: "pointer", borderRadius: 5, color: ink }}
+                      >
+                        {u.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, display: "grid", gap: 8 }}>
+            <Btn onClick={submit} disabled={!canSubmit || submitting} full>
+              {submitting ? "Submitting…" : "Submit Picks"}
+            </Btn>
+            {rows.some((r) => rowStatus(r) === "partial") && (
+              <span style={{ fontSize: 11.5, color: clay, display: "flex", alignItems: "flex-start", gap: 5 }}>
+                <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} /> Every row needs exactly 3 picks or none before submitting.
+              </span>
+            )}
+            {submitMessage && (
+              <span style={{ fontSize: 12, color: green, display: "flex", alignItems: "flex-start", gap: 5 }}>
+                <Check size={13} style={{ flexShrink: 0, marginTop: 1 }} /> {submitMessage}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ overflowX: "auto", background: "#fff", border: `1px solid ${line}`, borderRadius: 10 }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 200 + rows.length * 90 }}>
+              <thead>
+                <tr>
+                  <th style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 160 }}>
+                    Student
+                  </th>
+                  {rows.map((c) => (
+                    <th
+                      key={c.studentId}
+                      style={{ borderBottom: `1px solid ${line}`, borderLeft: `1px solid ${line}`, padding: "10px 8px", fontFamily: sans, fontSize: 12, fontWeight: 700, minWidth: 90 }}
+                    >
+                      {c.name}
+                    </th>
+                  ))}
+                  <th style={{ borderBottom: `1px solid ${line}`, width: 36 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const status = rowStatus(r);
+                  return (
+                    <tr key={r.studentId}>
+                      <td style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "8px 12px", fontSize: 13 }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          {status === "full" && <Check size={13} color={green} />}
+                          {status === "partial" && <AlertTriangle size={13} color={clay} />}
+                          <span style={{ fontWeight: 600 }}>{r.name}</span>
+                        </span>
+                      </td>
+                      {rows.map((c) => {
+                        const isSelf = c.studentId === r.studentId;
+                        const checked = r.picks.includes(c.studentId);
+                        return (
+                          <td
+                            key={c.studentId}
+                            onClick={() => !isSelf && togglePick(r.studentId, c.studentId)}
+                            title={isSelf ? undefined : checked ? "Click to uncheck" : "Click to check"}
+                            style={{
+                              borderBottom: `1px solid ${line}`,
+                              borderLeft: `1px solid ${line}`,
+                              padding: 8,
+                              textAlign: "center",
+                              background: isSelf ? "#F6F9FC" : "transparent",
+                              cursor: isSelf ? "default" : "pointer",
+                            }}
+                          >
+                            {isSelf ? (
+                              <span style={{ color: inkSoft }}>—</span>
+                            ) : checked ? (
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  width: 22,
+                                  height: 22,
+                                  borderRadius: 6,
+                                  background: greenSoft,
+                                  border: `1px solid ${green}55`,
+                                }}
+                              >
+                                <Check size={14} color={green} />
+                              </span>
+                            ) : null}
+                          </td>
+                        );
+                      })}
+                      <td style={{ borderBottom: `1px solid ${line}`, textAlign: "center" }}>
+                        <IconBtn tone="clay" title="Remove row" onClick={() => removeRow(r.studentId)}>
+                          <X size={12} />
+                        </IconBtn>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={2} style={{ padding: "18px 12px", color: inkSoft, fontSize: 13 }}>
+                      No students added yet — use "Add test student" in the sidebar.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
