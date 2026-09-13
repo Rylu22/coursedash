@@ -144,6 +144,10 @@ function normalizeGroup(g) {
     mode: g.mode || "courses",
     courses: g.courses || g.clubs || [],
     status: g.status || "active",
+    // Team mode only: once open, an accepted member can name up to 3 groupmates
+    // (unordered, equal weight) they'd like to be placed with. Independent of `status`
+    // — join requests keep being accepted whether or not the survey is open.
+    surveyOpen: !!g.surveyOpen,
     resultsFinalized: !!g.resultsFinalized,
     publishedAt: g.publishedAt || null,
     publishedResults: g.publishedResults || null,
@@ -2676,7 +2680,8 @@ async function permanentlyDeleteGroup(group) {
   const subKeys = await storeList(`submission:${group.code}:`, true);
   const teamRequestKeys = await storeList(`team-request:${group.code}:`, true);
   const teamMemberKeys = await storeList(`team-member:${group.code}:`, true);
-  await Promise.all([...subKeys, ...teamRequestKeys, ...teamMemberKeys].map((k) => storeDelete(k, true)));
+  const teamPickKeys = await storeList(`team-picks:${group.code}:`, true);
+  await Promise.all([...subKeys, ...teamRequestKeys, ...teamMemberKeys, ...teamPickKeys].map((k) => storeDelete(k, true)));
 
   if (group.teacherEmail) {
     const tgKey = `teacher-groups:${safeKey(group.teacherEmail)}`;
@@ -6912,6 +6917,7 @@ function TeamGroupEditor({ code }) {
   const [tab, setTab] = useState("mailbox");
   const [requests, setRequests] = useState([]);
   const [members, setMembers] = useState([]);
+  const [pickedIds, setPickedIds] = useState(new Set()); // member ids who've submitted their 3 groupmate picks
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(new Set());
   const [busy, setBusy] = useState(false);
@@ -6930,6 +6936,10 @@ function TeamGroupEditor({ code }) {
     const mems = (await Promise.all(memberKeys.map((k) => storeGet(k, true)))).filter(Boolean);
     mems.sort((a, b) => a.name.localeCompare(b.name));
     setMembers(mems);
+    const pickKeys = await storeList(`team-picks:${code}:`, true);
+    // Keys are `team-picks:<code>:<studentId>` — the id is everything after that prefix,
+    // which is enough to know who's submitted without fetching each pick record.
+    setPickedIds(new Set(pickKeys.map((k) => k.slice(`team-picks:${code}:`.length))));
     setSelected(new Set());
     setLoading(false);
   }, [code]);
@@ -6940,6 +6950,12 @@ function TeamGroupEditor({ code }) {
 
   const updateStatus = async (status) => {
     const updated = { ...group, status };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
+  };
+
+  const activateSurvey = async () => {
+    const updated = { ...group, surveyOpen: true };
     setGroup(updated);
     await storeSet(`group:${code}`, updated, true);
   };
@@ -6984,10 +7000,18 @@ function TeamGroupEditor({ code }) {
 
   // A removed student's request record is gone, not marked "declined" anywhere, so they
   // can simply send a fresh request later if this was a mistake — same as a course-mode
-  // student withdrawing and being able to rejoin with the code.
+  // student withdrawing and being able to rejoin with the code. Their groupmate picks (if
+  // any) are cleared too, so if they're re-accepted later they choose fresh rather than
+  // silently keeping stale picks from before they left.
   const removeMember = async (studentId) => {
     await storeDelete(`team-member:${code}:${studentId}`, true);
+    await storeDelete(`team-picks:${code}:${studentId}`, true);
     setMembers((prev) => prev.filter((m) => m.id !== studentId));
+    setPickedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(studentId);
+      return next;
+    });
   };
 
   if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
@@ -7060,6 +7084,48 @@ function TeamGroupEditor({ code }) {
         {group.status !== "active" && (
           <Btn onClick={() => updateStatus("active")}>
             <Play size={14} /> Activate Group
+          </Btn>
+        )}
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          background: "#fff",
+          border: `1px solid ${line}`,
+          borderRadius: 9,
+          padding: "10px 14px",
+          marginBottom: 18,
+          gap: 10,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              fontFamily: mono,
+              fontSize: 11,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              padding: "3px 9px",
+              borderRadius: 5,
+              background: group.surveyOpen ? greenSoft : "#E4E9F1",
+              color: group.surveyOpen ? green : inkSoft,
+            }}
+          >
+            {group.surveyOpen ? "Survey open" : "Survey not open"}
+          </span>
+          <span style={{ fontSize: 12.5, color: inkSoft }}>
+            {group.surveyOpen
+              ? `Accepted students can name 3 groupmates they'd like to be placed with. ${pickedIds.size} of ${members.length} submitted.`
+              : "Once open, accepted students can each name 3 groupmates they'd like to be placed with. Join requests keep working either way."}
+          </span>
+        </div>
+        {!group.surveyOpen && (
+          <Btn onClick={activateSurvey}>
+            <Play size={14} /> Activate Survey
           </Btn>
         )}
       </div>
@@ -7141,6 +7207,22 @@ function TeamGroupEditor({ code }) {
                   >
                     <span style={{ fontWeight: 600, flex: 1 }}>{m.name}</span>
                     {m.email && <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{m.email}</span>}
+                    {group.surveyOpen && (
+                      <span
+                        style={{
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          textTransform: "uppercase",
+                          letterSpacing: 0.5,
+                          padding: "2px 7px",
+                          borderRadius: 4,
+                          background: pickedIds.has(m.id) ? greenSoft : "#E4E9F1",
+                          color: pickedIds.has(m.id) ? green : inkSoft,
+                        }}
+                      >
+                        {pickedIds.has(m.id) ? "Picks in" : "Waiting"}
+                      </span>
+                    )}
                     <IconBtn tone="clay" onClick={() => removeMember(m.id)} title="Remove from group">
                       <X size={13} />
                     </IconBtn>
@@ -7378,6 +7460,7 @@ function ActiveGroupsList({ user, onEditGroup, onViewed }) {
       ) : (
         <div style={{ display: "grid", gap: 10 }}>
           {entries.map((g) => {
+            if (g.mode === "team") return <TeamActiveGroupCard key={g.code} g={g} user={user} />;
             const result = g.status === "published" ? myResult(g) : null;
             const eligible = requestEligible(g) && result;
             const reason = !eligible && !g._pendingRequest ? ineligibleReason(g, result) : null;
@@ -7583,26 +7666,38 @@ function StudentJoin({ onJoined }) {
   );
 }
 
-// ---------------- TEAM GROUP: STUDENT JOIN REQUEST ----------------
-// A team-mode group has no survey — a student just asks to join, and waits for their
-// teacher to accept or decline from the group's Mailbox. This screen covers all three
-// states a student can be in for a given team group: not yet requested, pending, or
-// already accepted.
-function TeamJoinScreen({ code, user, onDone }) {
-  const [group, setGroup] = useState(null);
+// ---------------- TEAM GROUP: STUDENT MEMBERSHIP ----------------
+// Shared read/write logic for a student's relationship to one team group — pending
+// request, accepted membership, and (once the teacher opens it) their 3 groupmate picks.
+// Used by both the full-page code-entry flow (TeamJoinScreen) and each team group's card
+// in the student's Active Groups list, so the two surfaces can't drift out of sync.
+function useTeamMembership(code, user) {
+  const myId = safeKey(user.email);
   const [memberRecord, setMemberRecord] = useState(null);
   const [requestRecord, setRequestRecord] = useState(null);
+  const [picksRecord, setPicksRecord] = useState(null);
+  const [otherMembers, setOtherMembers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-
-  const myId = safeKey(user.email);
+  const [editingPicks, setEditingPicks] = useState(false);
+  const [picks, setPicks] = useState([]);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const g = normalizeGroup(await storeGet(`group:${code}`, true));
-    setGroup(g);
-    setMemberRecord(await storeGet(`team-member:${code}:${myId}`, true));
+    const member = await storeGet(`team-member:${code}:${myId}`, true);
+    setMemberRecord(member);
     setRequestRecord(await storeGet(`team-request:${code}:${myId}`, true));
+    const existingPicks = await storeGet(`team-picks:${code}:${myId}`, true);
+    setPicksRecord(existingPicks);
+    setPicks(existingPicks?.choices || []);
+    setEditingPicks(false);
+    if (member) {
+      const memberKeys = await storeList(`team-member:${code}:`, true);
+      const mems = (await Promise.all(memberKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+      setOtherMembers(mems.filter((m) => m.id !== myId));
+    } else {
+      setOtherMembers([]);
+    }
     setLoading(false);
   }, [code, myId]);
 
@@ -7613,60 +7708,280 @@ function TeamJoinScreen({ code, user, onDone }) {
   const requestToJoin = async () => {
     setBusy(true);
     await storeSet(`team-request:${code}:${myId}`, { id: myId, name: user.name, email: user.email, createdAt: Date.now() }, true);
+    // So the group shows up in Active Groups from the moment a request goes out —
+    // matching a course-mode group's index entry from the moment a response is submitted.
+    const indexKey = `student-groups:${myId}`;
+    const existing = (await storeGet(indexKey, true)) || [];
+    if (!existing.includes(code)) await storeSet(indexKey, [...existing, code], true);
     setBusy(false);
-    load();
+    await load();
   };
 
   const cancelRequest = async () => {
     setBusy(true);
     await storeDelete(`team-request:${code}:${myId}`, true);
+    const indexKey = `student-groups:${myId}`;
+    const existing = (await storeGet(indexKey, true)) || [];
+    await storeSet(indexKey, existing.filter((c) => c !== code), true);
     setBusy(false);
-    load();
+    await load();
   };
 
-  if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
+  const toggleChoice = (id) =>
+    setPicks((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 3 ? [...prev, id] : prev));
+
+  const submitPicks = async () => {
+    if (picks.length !== 3) return;
+    setBusy(true);
+    await storeSet(`team-picks:${code}:${myId}`, { id: myId, name: user.name, email: user.email, choices: picks, createdAt: Date.now() }, true);
+    setBusy(false);
+    await load();
+  };
+
+  const nameById = (id) => otherMembers.find((m) => m.id === id)?.name || "(no longer on the team)";
+
+  return {
+    memberRecord,
+    requestRecord,
+    picksRecord,
+    otherMembers,
+    loading,
+    busy,
+    editingPicks,
+    setEditingPicks,
+    picks,
+    setPicks,
+    load,
+    requestToJoin,
+    cancelRequest,
+    toggleChoice,
+    submitPicks,
+    nameById,
+  };
+}
+
+// Checkbox list capped at exactly `max` selections — used wherever a student names
+// groupmates, since the picks are unordered and equally weighted (no ranking).
+function GroupmatePicker({ options, selected, onToggle, max = 3 }) {
+  return (
+    <div style={{ display: "grid", gap: 4, maxHeight: 220, overflowY: "auto", marginBottom: 10 }}>
+      {options.map((o) => {
+        const checked = selected.includes(o.id);
+        const disable = !checked && selected.length >= max;
+        return (
+          <label
+            key={o.id}
+            style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, padding: "4px 2px", opacity: disable ? 0.5 : 1, cursor: disable ? "not-allowed" : "pointer" }}
+          >
+            <input type="checkbox" checked={checked} disabled={disable} onChange={() => onToggle(o.id)} style={{ width: 15, height: 15, flexShrink: 0 }} />
+            {o.name}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------- TEAM GROUP: STUDENT JOIN REQUEST (full page) ----------------
+// Reached by entering a team group's code on the Join tab. Covers every state a student
+// can be in: not yet requested, pending, accepted-but-survey-not-open, and (once the
+// teacher opens it) picking or reviewing their 3 groupmate choices.
+function TeamJoinScreen({ code, user, onDone }) {
+  const [group, setGroup] = useState(null);
+  const [groupLoading, setGroupLoading] = useState(true);
+  const m = useTeamMembership(code, user);
+
+  useEffect(() => {
+    (async () => {
+      setGroupLoading(true);
+      setGroup(normalizeGroup(await storeGet(`group:${code}`, true)));
+      setGroupLoading(false);
+    })();
+  }, [code]);
+
+  if (groupLoading || m.loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
 
   return (
     <div style={{ maxWidth: 420, margin: "0 auto" }}>
       <Header eyebrow="Team group" title={group.name} />
       <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 10, padding: 20 }}>
-        {memberRecord ? (
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, color: green, fontWeight: 700, fontSize: 15, marginBottom: 10 }}>
-              <Check size={18} /> You're part of this team
+        {m.memberRecord ? (
+          group.surveyOpen ? (
+            m.picksRecord && !m.editingPicks ? (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: green, fontWeight: 700, fontSize: 15, marginBottom: 10 }}>
+                  <Check size={18} /> Picks submitted
+                </div>
+                <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 8 }}>You asked to be placed with:</p>
+                <ul style={{ margin: "0 0 16px", paddingLeft: 18, fontSize: 13.5 }}>
+                  {m.picksRecord.choices.map((id) => (
+                    <li key={id}>{m.nameById(id)}</li>
+                  ))}
+                </ul>
+                <Btn tone="ghost" onClick={() => m.setEditingPicks(true)} full>
+                  <Pencil size={13} /> Edit picks
+                </Btn>
+              </div>
+            ) : (
+              <div>
+                <p style={{ fontSize: 13.5, color: ink, marginBottom: 10 }}>
+                  Pick exactly 3 teammates you'd like to be placed with. All three count equally — there's no ranking.
+                </p>
+                {m.otherMembers.length < 3 ? (
+                  <p style={{ fontSize: 12.5, color: clay, marginBottom: 14 }}>
+                    Only {m.otherMembers.length} other student{m.otherMembers.length === 1 ? "" : "s"} joined so far — you need at least 3 to choose from before you can submit.
+                  </p>
+                ) : (
+                  <GroupmatePicker options={m.otherMembers} selected={m.picks} onToggle={m.toggleChoice} />
+                )}
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <Btn onClick={m.submitPicks} disabled={m.busy || m.picks.length !== 3}>
+                    {m.busy ? "Submitting…" : "Submit picks"}
+                  </Btn>
+                  {m.picksRecord && (
+                    <Btn tone="ghost" onClick={() => { m.setEditingPicks(false); m.setPicks(m.picksRecord.choices); }} disabled={m.busy}>
+                      Cancel
+                    </Btn>
+                  )}
+                  <span style={{ fontSize: 12, color: inkSoft }}>{m.picks.length}/3 selected</span>
+                </div>
+              </div>
+            )
+          ) : (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, color: green, fontWeight: 700, fontSize: 15, marginBottom: 10 }}>
+                <Check size={18} /> You're part of this team
+              </div>
+              <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 16 }}>
+                Your teacher accepted your request to join "{group.name}". They haven't opened the groupmate survey yet — check back later.
+              </p>
+              <Btn onClick={onDone} full>
+                Done
+              </Btn>
             </div>
-            <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 16 }}>
-              Your teacher accepted your request to join "{group.name}".
-            </p>
-            <Btn onClick={onDone} full>
-              Done
-            </Btn>
-          </div>
-        ) : requestRecord ? (
+          )
+        ) : m.requestRecord ? (
           <div>
             <p style={{ fontSize: 13.5, color: ink, marginBottom: 14 }}>
               Your request to join is pending — waiting on your teacher to accept it.
             </p>
             <div style={{ display: "flex", gap: 8 }}>
-              <Btn tone="ghost" onClick={load} disabled={busy}>
+              <Btn tone="ghost" onClick={m.load} disabled={m.busy}>
                 <RefreshCw size={13} /> Check again
               </Btn>
-              <Btn tone="clay" onClick={cancelRequest} disabled={busy}>
-                {busy ? "Cancelling…" : "Cancel request"}
+              <Btn tone="clay" onClick={m.cancelRequest} disabled={m.busy}>
+                {m.busy ? "Cancelling…" : "Cancel request"}
               </Btn>
             </div>
           </div>
+        ) : group.status === "draft" ? (
+          <p style={{ fontSize: 13.5, color: inkSoft }}>This group isn't open for join requests yet — check back once your teacher activates it.</p>
         ) : (
           <div>
             <p style={{ fontSize: 13.5, color: ink, marginBottom: 16 }}>
               Send a request to join this team. Your teacher will need to accept it before you're added.
             </p>
-            <Btn onClick={requestToJoin} full disabled={busy}>
-              {busy ? "Sending…" : "Request to join"}
+            <Btn onClick={m.requestToJoin} full disabled={m.busy}>
+              {m.busy ? "Sending…" : "Request to join"}
             </Btn>
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------- TEAM GROUP: ACTIVE GROUPS CARD ----------------
+// The equivalent of a course-mode group's card in the student's Active Groups tab — same
+// membership states as TeamJoinScreen, just laid out inline within the existing card style
+// instead of as its own page, so a student never has to re-enter the code to check status
+// or fill out the groupmate survey once it's open.
+function TeamActiveGroupCard({ g, user }) {
+  const m = useTeamMembership(g.code, user);
+
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: "12px 14px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span style={{ fontFamily: serif, fontSize: 16, fontWeight: 700 }}>{g.name}</span>
+        <span
+          style={{
+            fontFamily: mono,
+            fontSize: 9.5,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+            padding: "2px 6px",
+            borderRadius: 4,
+            background: greenSoft,
+            color: green,
+          }}
+        >
+          Team
+        </span>
+      </div>
+
+      {m.loading ? (
+        <p style={{ color: inkSoft, fontSize: 12.5, marginTop: 6 }}>Loading…</p>
+      ) : m.memberRecord ? (
+        g.surveyOpen ? (
+          m.picksRecord && !m.editingPicks ? (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 12.5, color: green, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
+                <Check size={13} /> Picks submitted
+              </div>
+              <p style={{ fontSize: 12, color: inkSoft, margin: "4px 0 8px" }}>{m.picksRecord.choices.map(m.nameById).join(", ")}</p>
+              <Btn tone="ghost" onClick={() => m.setEditingPicks(true)}>
+                <Pencil size={12} /> Edit picks
+              </Btn>
+            </div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 8 }}>
+                Pick exactly 3 teammates you'd like to be placed with — no ranking, all three count equally.
+              </p>
+              {m.otherMembers.length < 3 ? (
+                <p style={{ fontSize: 12, color: clay, marginBottom: 8 }}>
+                  Only {m.otherMembers.length} other student{m.otherMembers.length === 1 ? "" : "s"} joined so far — need at least 3 to choose from.
+                </p>
+              ) : (
+                <GroupmatePicker options={m.otherMembers} selected={m.picks} onToggle={m.toggleChoice} />
+              )}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <Btn onClick={m.submitPicks} disabled={m.busy || m.picks.length !== 3}>
+                  {m.busy ? "Submitting…" : "Submit picks"}
+                </Btn>
+                {m.picksRecord && (
+                  <Btn tone="ghost" onClick={() => { m.setEditingPicks(false); m.setPicks(m.picksRecord.choices); }} disabled={m.busy}>
+                    Cancel
+                  </Btn>
+                )}
+                <span style={{ fontSize: 11.5, color: inkSoft }}>{m.picks.length}/3</span>
+              </div>
+            </div>
+          )
+        ) : (
+          <p style={{ fontSize: 12.5, color: inkSoft, marginTop: 4 }}>
+            You're part of this team. Waiting on your teacher to open the groupmate survey.
+          </p>
+        )
+      ) : m.requestRecord ? (
+        <div style={{ marginTop: 8 }}>
+          <p style={{ fontSize: 12.5, color: gold, background: goldSoft, borderRadius: 6, padding: "6px 9px", margin: "0 0 8px" }}>
+            Request to join — waiting on your teacher.
+          </p>
+          <Btn tone="clay" onClick={m.cancelRequest} disabled={m.busy}>
+            {m.busy ? "Cancelling…" : "Cancel request"}
+          </Btn>
+        </div>
+      ) : g.status === "draft" ? (
+        <p style={{ fontSize: 12.5, color: inkSoft, marginTop: 4 }}>Not open for join requests right now.</p>
+      ) : (
+        <div style={{ marginTop: 8 }}>
+          <Btn onClick={m.requestToJoin} disabled={m.busy}>
+            {m.busy ? "Sending…" : "Request to join"}
+          </Btn>
+        </div>
+      )}
     </div>
   );
 }
