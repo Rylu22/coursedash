@@ -3340,6 +3340,37 @@ function QuickFillGrid({ code }) {
     setRows(nextRows);
   };
 
+  // Regenerates every row's choices (and grade, if collected) from scratch in one undo
+  // step — "random" draws each row's ranked courses uniformly; "biased" picks 1-2
+  // courses once for the whole batch and weights the draw so those show up far more
+  // often across rows, mimicking a realistic popular-course skew instead of a flat
+  // distribution. Either way each row still ends up with `choiceCount` distinct courses.
+  const autoFillRows = (mode) => {
+    if (courses.length < 2 || rows.length === 0) return;
+    const popular = mode === "biased" ? shuffled(courses).slice(0, Math.min(2, courses.length)) : [];
+    const pool = [];
+    courses.forEach((c) => {
+      const weight = popular.some((p) => p.id === c.id) ? 6 : 1;
+      for (let i = 0; i < weight; i++) pool.push(c);
+    });
+    updateRows((prev) =>
+      prev.map((r) => {
+        const chosen = [];
+        const usedIds = new Set();
+        while (chosen.length < choiceCount && usedIds.size < courses.length) {
+          const pick = pool[Math.floor(Math.random() * pool.length)];
+          if (!usedIds.has(pick.id)) {
+            usedIds.add(pick.id);
+            chosen.push(pick);
+          }
+        }
+        const assignments = {};
+        chosen.forEach((c, i) => (assignments[c.id] = i + 1));
+        return { ...r, assignments, grade: settings.collectGrade ? String(6 + Math.floor(Math.random() * 7)) : r.grade };
+      })
+    );
+  };
+
   const addStudentRow = (student) => {
     const studentId = safeKey(student.email);
     if (addedIds.has(studentId)) return;
@@ -3563,6 +3594,18 @@ function QuickFillGrid({ code }) {
               <IconBtn title="Redo" onClick={redo} disabled={redoStack.length === 0}>
                 <Redo2 size={14} />
               </IconBtn>
+            </div>
+
+            <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 11, color: inkSoft, fontWeight: 700 }}>Auto fill every row</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <Btn tone="ghost" onClick={() => autoFillRows("random")} disabled={rows.length === 0} full>
+                  Random
+                </Btn>
+                <Btn tone="ghost" onClick={() => autoFillRows("biased")} disabled={rows.length === 0} full>
+                  Biased
+                </Btn>
+              </div>
             </div>
 
             <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, position: "relative" }}>
@@ -3876,6 +3919,33 @@ function TeamQuickFillGrid({ code }) {
     setRows(nextRows);
   };
 
+  // Regenerates every row's 3 picks from scratch in one undo step — "random" draws each
+  // row's picks uniformly from everyone else in the grid; "biased" picks 1-2 "popular"
+  // students once for the whole batch and weights the draw so they show up in far more
+  // rows' picks than everyone else, mimicking a realistic popular-kid skew. Needs at
+  // least 4 students in the grid (yourself plus 3 to pick from); rows are left
+  // untouched if there still aren't enough others to fill from.
+  const autoFillRows = (mode) => {
+    if (rows.length < 4) return;
+    const popularIds = mode === "biased" ? shuffled(rows).slice(0, Math.min(2, rows.length)).map((r) => r.studentId) : [];
+    updateRows((prev) =>
+      prev.map((r) => {
+        const others = prev.filter((o) => o.studentId !== r.studentId);
+        if (others.length < 3) return r;
+        const pool = [];
+        others.forEach((o) => {
+          const weight = popularIds.includes(o.studentId) ? 6 : 1;
+          for (let i = 0; i < weight; i++) pool.push(o);
+        });
+        const chosenIds = new Set();
+        while (chosenIds.size < 3) {
+          chosenIds.add(pool[Math.floor(Math.random() * pool.length)].studentId);
+        }
+        return { ...r, picks: [...chosenIds] };
+      })
+    );
+  };
+
   const addStudentRow = (student) => {
     const studentId = safeKey(student.email);
     if (addedIds.has(studentId)) return;
@@ -3994,6 +4064,21 @@ function TeamQuickFillGrid({ code }) {
             <IconBtn title="Redo" onClick={redo} disabled={redoStack.length === 0}>
               <Redo2 size={14} />
             </IconBtn>
+          </div>
+
+          <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, display: "grid", gap: 6 }}>
+            <span style={{ fontSize: 11, color: inkSoft, fontWeight: 700 }}>Auto fill every row</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Btn tone="ghost" onClick={() => autoFillRows("random")} disabled={rows.length < 4} full>
+                Random
+              </Btn>
+              <Btn tone="ghost" onClick={() => autoFillRows("biased")} disabled={rows.length < 4} full>
+                Biased
+              </Btn>
+            </div>
+            {rows.length > 0 && rows.length < 4 && (
+              <span style={{ fontSize: 10.5, color: inkSoft }}>Needs at least 4 students in the grid.</span>
+            )}
           </div>
 
           <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, position: "relative" }}>
