@@ -148,7 +148,7 @@ function normalizeGroup(g) {
     // "courses" (the default) is a normal preference-ranking group; "team" is a
     // completely different shape — students request to join by code instead of ranking
     // anything, a teacher accepts/declines them in the group's own Mailbox tab, and
-    // accepted students land on its Students tab. No courses, logic, or results apply.
+    // accepted students land on its Students tab. No course-mode courses/results apply.
     mode: g.mode || "courses",
     courses: g.courses || g.clubs || [],
     status: g.status || "active",
@@ -156,6 +156,8 @@ function normalizeGroup(g) {
     // (unordered, equal weight) they'd like to be placed with. Independent of `status`
     // — join requests keep being accepted whether or not the survey is open.
     surveyOpen: !!g.surveyOpen,
+    // Team mode only: the outcome of the most recent "Run Assignment" — see assignTeams.
+    teamResults: g.teamResults || null,
     resultsFinalized: !!g.resultsFinalized,
     publishedAt: g.publishedAt || null,
     publishedResults: g.publishedResults || null,
@@ -382,6 +384,87 @@ function evenSplitSizes(total, teamCount) {
   const base = Math.floor(total / teamCount);
   const remainder = total % teamCount;
   return Array.from({ length: teamCount }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
+// ---- Team mode: run assignment ----
+// Fisher-Yates shuffle so the order students are placed in isn't biased by join order,
+// account creation order, or anything else about how the list arrived.
+function shuffled(list) {
+  const arr = list.slice();
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// Greedy affinity-based bin-packing: places accepted members into teams of the given
+// target sizes, trying to land each student with as many of their 3 picked groupmates
+// as possible. Processes students in random order (so no student's picks are favored
+// just because they joined or submitted first), and each one joins whichever
+// still-open team they're most "connected" to so far — a pick counts 1 point toward
+// wanting to be with that person, so a mutual pick (both picked each other) is worth 2
+// between that pair. A student with zero connection to every open team (no picks
+// submitted, or everyone they picked already landed on full teams) goes to whichever
+// open team has the most empty seats left, so leftover placements spread across teams
+// instead of piling into whichever team happens to fill first.
+//
+// This is a simple greedy heuristic, not an optimizer — it doesn't backtrack, so an
+// early placement can occasionally cost a later student a mutual match that would have
+// fit if things had gone in a different order. `teamSizes` is treated as a hard cap per
+// team: if the sizes add up to fewer than the member count, the leftover students come
+// back in `unassigned` for the teacher to place by hand.
+function assignTeams(members, picksByStudentId, teamSizes) {
+  const teams = teamSizes.map(() => []);
+  const pickSets = {};
+  members.forEach((m) => {
+    pickSets[m.id] = new Set(picksByStudentId[m.id]?.choices || []);
+  });
+  const affinityToTeam = (studentId, teamMembers) =>
+    teamMembers.reduce((sum, other) => {
+      let score = 0;
+      if (pickSets[studentId]?.has(other.id)) score += 1;
+      if (pickSets[other.id]?.has(studentId)) score += 1;
+      return sum + score;
+    }, 0);
+
+  const unassigned = [];
+  shuffled(members).forEach((student) => {
+    const openTeamIndexes = teams.map((_, i) => i).filter((i) => teams[i].length < teamSizes[i]);
+    if (openTeamIndexes.length === 0) {
+      unassigned.push(student);
+      return;
+    }
+    let best = null;
+    openTeamIndexes.forEach((i) => {
+      const score = affinityToTeam(student.id, teams[i]);
+      const room = teamSizes[i] - teams[i].length;
+      if (!best || score > best.score || (score === best.score && room > best.room)) {
+        best = { i, score, room };
+      }
+    });
+    teams[best.i].push(student);
+  });
+
+  return { teams, unassigned };
+}
+
+// How many of everyone's 3 picks actually landed them on the same team as that pick,
+// out of how many picks were submitted at all — a plain-language sanity check for
+// "did this placement actually honor what people asked for."
+function computeTeamSatisfaction(teams, picksByStudentId) {
+  let totalPicks = 0;
+  let satisfiedPicks = 0;
+  teams.forEach((team) => {
+    const idsInTeam = new Set(team.map((m) => m.id));
+    team.forEach((m) => {
+      (picksByStudentId[m.id]?.choices || []).forEach((choiceId) => {
+        totalPicks++;
+        if (idsInTeam.has(choiceId)) satisfiedPicks++;
+      });
+    });
+  });
+  return { totalPicks, satisfiedPicks };
 }
 
 // Scales each course's `target` proportionally so the capacities sum to exactly
@@ -7403,12 +7486,14 @@ function TeamGroupEditor({ code }) {
   const [requests, setRequests] = useState([]);
   const [members, setMembers] = useState([]);
   const [pickedIds, setPickedIds] = useState(new Set()); // member ids who've submitted their 3 groupmate picks
+  const [picksByStudentId, setPicksByStudentId] = useState({}); // id -> full { choices, ... } pick record
   const [settings, setSettings] = useState(DEFAULT_TEAM_SPLIT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(new Set());
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [copied, setCopied] = useState(false);
+  const [running, setRunning] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -7423,9 +7508,13 @@ function TeamGroupEditor({ code }) {
     mems.sort((a, b) => a.name.localeCompare(b.name));
     setMembers(mems);
     const pickKeys = await storeList(`team-picks:${code}:`, true);
-    // Keys are `team-picks:<code>:<studentId>` — the id is everything after that prefix,
-    // which is enough to know who's submitted without fetching each pick record.
-    setPickedIds(new Set(pickKeys.map((k) => k.slice(`team-picks:${code}:`.length))));
+    const picksList = (await Promise.all(pickKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    const picksById = {};
+    picksList.forEach((p) => {
+      picksById[p.id] = p;
+    });
+    setPicksByStudentId(picksById);
+    setPickedIds(new Set(picksList.map((p) => p.id)));
     if (g) setSettings(await loadTeamSplitSettings(g));
     setSelected(new Set());
     setLoading(false);
@@ -7478,6 +7567,27 @@ function TeamGroupEditor({ code }) {
       return;
     }
     updateSplitSetting({ splitMode: mode, customSizes: resizeCustomSizes(settings.customSizes, settings.teamCount, members.length) });
+  };
+
+  // Sizes come from whichever split mode is active — "even" recomputes live from the
+  // current member count, "custom" is whatever the teacher typed in the Logic tab.
+  const activeTeamSizes = () => (settings.splitMode === "custom" ? settings.customSizes : evenSplitSizes(members.length, settings.teamCount));
+
+  const runAssignment = async () => {
+    setRunning(true);
+    const teamSizes = activeTeamSizes();
+    const { teams, unassigned } = assignTeams(members, picksByStudentId, teamSizes);
+    const teamResults = {
+      teams: teams.map((team) => team.map((m) => ({ id: m.id, name: m.name, email: m.email }))),
+      unassigned: unassigned.map((m) => ({ id: m.id, name: m.name, email: m.email })),
+      teamSizes,
+      createdAt: Date.now(),
+    };
+    const updated = { ...group, teamResults };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
+    setRunning(false);
+    setTab("results");
   };
 
   const toggle = (id) =>
@@ -7673,6 +7783,7 @@ function TeamGroupEditor({ code }) {
         />
         <FolderTab active={tab === "students"} onClick={() => setTab("students")} icon={Users} label={`Students (${members.length})`} />
         <FolderTab active={tab === "logic"} onClick={() => setTab("logic")} icon={Sliders} label="Logic" />
+        <FolderTab active={tab === "results"} onClick={() => setTab("results")} icon={ListOrdered} label="Results" />
       </div>
 
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
@@ -7757,7 +7868,7 @@ function TeamGroupEditor({ code }) {
         {tab === "logic" && (
           <div>
             <p style={{ fontSize: 12.5, color: inkSoft, marginTop: -4, marginBottom: 14 }}>
-              Choose how accepted students should be split into teams. This sets up the split — actually running it to place specific students comes later.
+              Choose how accepted students should be split into teams, then run the assignment from the Results tab.
             </p>
 
             <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -7847,6 +7958,81 @@ function TeamGroupEditor({ code }) {
                   );
                 })()}
               </div>
+            )}
+          </div>
+        )}
+
+        {tab === "results" && (
+          <div>
+            {!group.teamResults ? (
+              <div style={{ textAlign: "center", padding: "20px 0" }}>
+                <p style={{ color: inkSoft, fontSize: 13, marginBottom: 14 }}>No assignment has been run yet.</p>
+                <Btn onClick={runAssignment} disabled={running || members.length === 0}>
+                  <Play size={15} /> {running ? "Running…" : "Run Assignment"}
+                </Btn>
+                {members.length === 0 && <p style={{ fontSize: 11.5, color: inkSoft, marginTop: 10 }}>Accept some students first.</p>}
+              </div>
+            ) : (
+              (() => {
+                const { teams, unassigned, createdAt } = group.teamResults;
+                const { totalPicks, satisfiedPicks } = computeTeamSatisfaction(teams, picksByStudentId);
+                return (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 10, flexWrap: "wrap" }}>
+                      <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
+                        Run {new Date(createdAt).toLocaleString()}.{" "}
+                        {totalPicks > 0
+                          ? `${satisfiedPicks} of ${totalPicks} groupmate picks landed on the same team (${Math.round((satisfiedPicks / totalPicks) * 100)}%).`
+                          : "No picks were submitted at the time this ran."}
+                      </p>
+                      <Btn tone="ghost" onClick={runAssignment} disabled={running || members.length === 0}>
+                        <RefreshCw size={14} /> {running ? "Running…" : "Re-run Assignment"}
+                      </Btn>
+                    </div>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {teams.map((team, i) => (
+                        <div key={i} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, overflow: "hidden" }}>
+                          <div style={{ background: greenSoft, padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                            <span style={{ fontFamily: serif, fontSize: 15.5, fontWeight: 700, color: green }}>Team {i + 1}</span>
+                            <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{team.length} student{team.length === 1 ? "" : "s"}</span>
+                          </div>
+                          {team.length === 0 ? (
+                            <p style={{ padding: "10px 14px", fontSize: 12.5, color: inkSoft, margin: 0 }}>No students placed here.</p>
+                          ) : (
+                            <div style={{ display: "grid" }}>
+                              {team.map((m, j) => {
+                                const gotPicks = (picksByStudentId[m.id]?.choices || []).filter((cid) => team.some((tm) => tm.id === cid));
+                                return (
+                                  <div
+                                    key={m.id}
+                                    style={{ padding: "8px 14px", fontSize: 13, background: j % 2 ? "#fff" : "#F6F9FC", display: "flex", justifyContent: "space-between", gap: 10 }}
+                                  >
+                                    <span style={{ fontWeight: 600 }}>{m.name}</span>
+                                    <span style={{ fontSize: 11.5, color: inkSoft }}>
+                                      {picksByStudentId[m.id] ? `${gotPicks.length} of 3 picks here` : "no picks submitted"}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {unassigned.length > 0 && (
+                      <div style={{ marginTop: 12, background: claySoft, border: `1px solid ${clay}55`, borderRadius: 9, padding: "10px 14px" }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color: clay, marginBottom: 4 }}>
+                          Unassigned ({unassigned.length})
+                        </div>
+                        <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 6px" }}>
+                          The configured team sizes don't add up to enough seats for everyone — adjust them in the Logic tab and re-run.
+                        </p>
+                        <div style={{ fontSize: 13 }}>{unassigned.map((m) => m.name).join(", ")}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
             )}
           </div>
         )}
