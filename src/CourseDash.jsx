@@ -399,35 +399,71 @@ function shuffled(list) {
   return arr;
 }
 
-// Greedy affinity-based bin-packing: places accepted members into teams of the given
-// target sizes, trying to land each student with as many of their 3 picked groupmates
-// as possible. Processes students in random order (so no student's picks are favored
-// just because they joined or submitted first), and each one joins whichever
-// still-open team they're most "connected" to so far — a pick counts 1 point toward
-// wanting to be with that person, so a mutual pick (both picked each other) is worth 2
-// between that pair. A student with zero connection to every open team (no picks
-// submitted, or everyone they picked already landed on full teams) goes to whichever
-// open team has the most empty seats left, so leftover placements spread across teams
-// instead of piling into whichever team happens to fill first.
+// A student's "points" on their current team: 1 for each of their own picks who's a
+// teammate, plus 1 for each teammate who picked *them* — so a mutual pick is worth 2
+// between that pair, same "1 friend = +1 point" system used to seed the placement.
+function pointsFor(studentId, teamMembers, pickSets) {
+  return teamMembers.reduce((sum, other) => {
+    if (other.id === studentId) return sum;
+    let score = 0;
+    if (pickSets[studentId]?.has(other.id)) score += 1;
+    if (pickSets[other.id]?.has(studentId)) score += 1;
+    return sum + score;
+  }, 0);
+}
+function pointsByStudent(teams, pickSets) {
+  const points = {};
+  teams.forEach((team) => {
+    team.forEach((m) => {
+      points[m.id] = pointsFor(m.id, team, pickSets);
+    });
+  });
+  return points;
+}
+// Mean absolute deviation of a set of numbers: on average, how far each value sits from
+// the group's mean. Low = everyone's points are close together (even, fair outcomes);
+// high = some students are scoring far above or below everyone else.
+function meanAbsoluteDeviation(values) {
+  if (values.length === 0) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  return values.reduce((sum, v) => sum + Math.abs(v - mean), 0) / values.length;
+}
+
+// Greedy affinity-based bin-packing, followed by a fairness pass: places accepted
+// members into teams of the given target sizes, trying to land each student with as
+// many of their 3 picked groupmates as possible, then swaps students between teams to
+// even out how well everyone did (minimizing the mean absolute deviation of everyone's
+// points — see pointsFor/meanAbsoluteDeviation) so satisfaction isn't concentrated in a
+// few students while others get none.
 //
-// This is a simple greedy heuristic, not an optimizer — it doesn't backtrack, so an
-// early placement can occasionally cost a later student a mutual match that would have
-// fit if things had gone in a different order. `teamSizes` is treated as a hard cap per
-// team: if the sizes add up to fewer than the member count, the leftover students come
-// back in `unassigned` for the teacher to place by hand.
-function assignTeams(members, picksByStudentId, teamSizes) {
+// Step 1 — initial placement: students are shuffled into random order (so no one's
+// picks are favored just by having joined or submitted first), and each one joins
+// whichever still-open team they're most "connected" to so far — a pick is worth 1
+// point toward wanting to be with that person, 2 if mutual. Ties, or a student with
+// zero connection to any open team, go to whichever open team has the most empty seats
+// left, so leftovers spread out instead of piling into one team.
+//
+// Step 2 — fairness pass: repeatedly looks for the single best swap of two students on
+// different teams that reduces the mean absolute deviation of everyone's points, and
+// takes it, until no swap helps anymore (a local optimum) or it's tried `maxSwapPasses`
+// times. This is what lets it trade a small loss for an over-satisfied student for a
+// meaningful gain for someone with zero — plain greedy placement alone won't do that.
+// A swap only counts as "helping" if it doesn't lower everyone's total points — pure MAD
+// minimization would happily level a well-matched pair down to zero each just because
+// "everyone equally unsatisfied" scores as more even than "some got their picks, some
+// didn't"; requiring the total to hold steady or improve rules that out, so the pass can
+// only make things more even by lifting people up, never by dragging others down.
+//
+// Neither step backtracks or guarantees a global optimum — it's a heuristic, not an
+// exact solver. `teamSizes` is a hard cap per team: if the sizes add up to fewer seats
+// than the member count, the leftover students come back in `unassigned` for the
+// teacher to place by hand, and never take part in the fairness-swap pass.
+function assignTeams(members, picksByStudentId, teamSizes, maxSwapPasses = 300) {
   const teams = teamSizes.map(() => []);
   const pickSets = {};
   members.forEach((m) => {
     pickSets[m.id] = new Set(picksByStudentId[m.id]?.choices || []);
   });
-  const affinityToTeam = (studentId, teamMembers) =>
-    teamMembers.reduce((sum, other) => {
-      let score = 0;
-      if (pickSets[studentId]?.has(other.id)) score += 1;
-      if (pickSets[other.id]?.has(studentId)) score += 1;
-      return sum + score;
-    }, 0);
 
   const unassigned = [];
   shuffled(members).forEach((student) => {
@@ -438,7 +474,7 @@ function assignTeams(members, picksByStudentId, teamSizes) {
     }
     let best = null;
     openTeamIndexes.forEach((i) => {
-      const score = affinityToTeam(student.id, teams[i]);
+      const score = pointsFor(student.id, teams[i], pickSets);
       const room = teamSizes[i] - teams[i].length;
       if (!best || score > best.score || (score === best.score && room > best.room)) {
         best = { i, score, room };
@@ -446,6 +482,40 @@ function assignTeams(members, picksByStudentId, teamSizes) {
     });
     teams[best.i].push(student);
   });
+
+  // Fairness pass: best-improvement local search. Each round tries every pair of
+  // students on two different teams, swapping them (team sizes never change — it's a
+  // straight 1-for-1 swap) and checking whether that lowers the population-wide MAD
+  // without lowering the total points everyone has combined. Keeps the single
+  // best-improving swap it finds and repeats; stops as soon as a round finds no swap
+  // that helps.
+  const totalPoints = (pts) => Object.values(pts).reduce((a, b) => a + b, 0);
+  for (let pass = 0; pass < maxSwapPasses; pass++) {
+    const currentPoints = pointsByStudent(teams, pickSets);
+    const currentMad = meanAbsoluteDeviation(Object.values(currentPoints));
+    const currentTotal = totalPoints(currentPoints);
+    let bestSwap = null;
+    let bestMad = currentMad;
+    for (let ti = 0; ti < teams.length; ti++) {
+      for (let tj = ti + 1; tj < teams.length; tj++) {
+        for (let i = 0; i < teams[ti].length; i++) {
+          for (let j = 0; j < teams[tj].length; j++) {
+            const trial = teams.map((t) => t.slice());
+            [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
+            const trialPoints = pointsByStudent(trial, pickSets);
+            const mad = meanAbsoluteDeviation(Object.values(trialPoints));
+            if (mad < bestMad - 1e-9 && totalPoints(trialPoints) >= currentTotal - 1e-9) {
+              bestMad = mad;
+              bestSwap = { ti, i, tj, j };
+            }
+          }
+        }
+      }
+    }
+    if (!bestSwap) break;
+    const { ti, i, tj, j } = bestSwap;
+    [teams[ti][i], teams[tj][j]] = [teams[tj][j], teams[ti][i]];
+  }
 
   return { teams, unassigned };
 }
@@ -466,6 +536,17 @@ function computeTeamSatisfaction(teams, picksByStudentId) {
     });
   });
   return { totalPicks, satisfiedPicks };
+}
+
+// The same mean absolute deviation the fairness pass optimizes for, computed on the
+// final placement — a lower number means everyone's points ended up closer together
+// (more even outcomes), a higher number means satisfaction is more concentrated in a
+// few students. Shown alongside computeTeamSatisfaction so a teacher can see both "how
+// much of what people asked for got honored overall" and "how evenly that was spread."
+function computeTeamFairness(teams, picksByStudentId) {
+  const pickSets = {};
+  teams.forEach((team) => team.forEach((m) => (pickSets[m.id] = new Set(picksByStudentId[m.id]?.choices || []))));
+  return meanAbsoluteDeviation(Object.values(pointsByStudent(teams, pickSets)));
 }
 
 // Scales each course's `target` proportionally so the capacities sum to exactly
@@ -8023,13 +8104,16 @@ function TeamGroupEditor({ code }) {
               (() => {
                 const { teams, unassigned, createdAt } = group.teamResults;
                 const { totalPicks, satisfiedPicks } = computeTeamSatisfaction(teams, picksByStudentId);
+                const fairness = computeTeamFairness(teams, picksByStudentId);
                 return (
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 10, flexWrap: "wrap" }}>
                       <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
                         Run {new Date(createdAt).toLocaleString()}.{" "}
                         {totalPicks > 0
-                          ? `${satisfiedPicks} of ${totalPicks} groupmate picks landed on the same team (${Math.round((satisfiedPicks / totalPicks) * 100)}%).`
+                          ? `${satisfiedPicks} of ${totalPicks} groupmate picks landed on the same team (${Math.round(
+                              (satisfiedPicks / totalPicks) * 100
+                            )}%). Fairness (lower = more even): ${fairness.toFixed(2)}.`
                           : "No picks were submitted at the time this ran."}
                       </p>
                       <Btn tone="ghost" onClick={runAssignment} disabled={running || members.length === 0}>
