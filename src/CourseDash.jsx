@@ -152,10 +152,16 @@ function normalizeGroup(g) {
     mode: g.mode || "courses",
     courses: g.courses || g.clubs || [],
     status: g.status || "active",
-    // Team mode only: once open, an accepted member can name up to 3 groupmates
-    // (unordered, equal weight) they'd like to be placed with. Independent of `status`
-    // — join requests keep being accepted whether or not the survey is open.
+    // Team mode only: once open, an accepted member can name up to `pickCount`
+    // groupmates (unordered, equal weight) they'd like to be placed with. Independent
+    // of `status` — join requests keep being accepted whether or not the survey is open.
     surveyOpen: !!g.surveyOpen,
+    // Teacher-configurable — how many groupmates each student names. Whatever's
+    // actually asked of a given student is still capped at however many OTHER accepted
+    // members exist (see effectivePickCount), so this being set higher than the team
+    // can support yet isn't a dead end — it just relaxes automatically until enough
+    // students join, rather than blocking the survey outright.
+    pickCount: g.pickCount || 3,
     // Team mode only: the outcome of the most recent "Run Assignment" — see assignTeams.
     teamResults: g.teamResults || null,
     resultsFinalized: !!g.resultsFinalized,
@@ -385,6 +391,15 @@ function evenSplitSizes(total, teamCount) {
   const base = Math.floor(total / teamCount);
   const remainder = total % teamCount;
   return Array.from({ length: teamCount }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
+// The teacher's configured pick count can't always be honored — a team of 3 total
+// can't ask anyone to name 5 groupmates, since only 2 others exist to pick from. This
+// is what "gets around" that: the number actually required of a given student is
+// whichever is smaller, so the survey relaxes to however many other accepted members
+// currently exist instead of demanding an impossible count.
+function effectivePickCount(pickCount, otherMemberCount) {
+  return Math.max(0, Math.min(pickCount, otherMemberCount));
 }
 
 // ---- Team mode: run assignment ----
@@ -3895,6 +3910,7 @@ function TeamQuickFillGrid({ code }) {
     load();
   }, [load]);
 
+  const pickCount = group?.pickCount || 3;
   const addedIds = new Set(rows.map((r) => r.studentId));
   const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email))).sort(compareTestName);
 
@@ -3919,26 +3935,28 @@ function TeamQuickFillGrid({ code }) {
     setRows(nextRows);
   };
 
-  // Regenerates every row's 3 picks from scratch in one undo step — "random" draws each
+  // Regenerates every row's picks from scratch in one undo step — "random" draws each
   // row's picks uniformly from everyone else in the grid; "biased" picks 1-2 "popular"
   // students once for the whole batch and weights the draw so they show up in far more
   // rows' picks than everyone else, mimicking a realistic popular-kid skew. Needs at
-  // least 4 students in the grid (yourself plus 3 to pick from); rows are left
-  // untouched if there still aren't enough others to fill from.
+  // least `pickCount + 1` students in the grid (yourself plus enough to pick from); a
+  // row with fewer others available than `pickCount` fills as many as it can instead of
+  // being skipped outright, same relaxed-count behavior the real survey uses.
   const autoFillRows = (mode) => {
-    if (rows.length < 4) return;
+    if (rows.length < 2) return;
     const popularIds = mode === "biased" ? shuffled(rows).slice(0, Math.min(2, rows.length)).map((r) => r.studentId) : [];
     updateRows((prev) =>
       prev.map((r) => {
         const others = prev.filter((o) => o.studentId !== r.studentId);
-        if (others.length < 3) return r;
+        const need = effectivePickCount(pickCount, others.length);
+        if (need === 0) return r;
         const pool = [];
         others.forEach((o) => {
           const weight = popularIds.includes(o.studentId) ? 6 : 1;
           for (let i = 0; i < weight; i++) pool.push(o);
         });
         const chosenIds = new Set();
-        while (chosenIds.size < 3) {
+        while (chosenIds.size < need) {
           chosenIds.add(pool[Math.floor(Math.random() * pool.length)].studentId);
         }
         return { ...r, picks: [...chosenIds] };
@@ -3991,13 +4009,17 @@ function TeamQuickFillGrid({ code }) {
   const removeRow = (studentId) =>
     updateRows((prev) => prev.filter((r) => r.studentId !== studentId).map((r) => ({ ...r, picks: r.picks.filter((id) => id !== studentId) })));
 
+  // Every row shares the same effective cap: how many others actually exist in the
+  // grid right now, same relaxed-count rule the real survey uses.
+  const requiredPicks = effectivePickCount(pickCount, Math.max(0, rows.length - 1));
+
   const togglePick = (rowId, colId) => {
     if (rowId === colId) return;
     updateRows((prev) =>
       prev.map((r) => {
         if (r.studentId !== rowId) return r;
         if (r.picks.includes(colId)) return { ...r, picks: r.picks.filter((id) => id !== colId) };
-        if (r.picks.length >= 3) return r;
+        if (r.picks.length >= requiredPicks) return r;
         return { ...r, picks: [...r.picks, colId] };
       })
     );
@@ -4005,7 +4027,7 @@ function TeamQuickFillGrid({ code }) {
 
   const rowStatus = (row) => {
     if (row.picks.length === 0) return "empty";
-    if (row.picks.length === 3) return "full";
+    if (row.picks.length === requiredPicks) return "full";
     return "partial";
   };
 
@@ -4034,7 +4056,9 @@ function TeamQuickFillGrid({ code }) {
       <Header
         eyebrow={group.name}
         title="Quick fill test picks"
-        sub="Click a cell to check a student in as one of that row's 3 groupmate picks — no ranking, all three count equally. A row needs exactly 3 checks or none before submitting."
+        sub={`Click a cell to check a student in as one of that row's ${pickCount} groupmate pick${
+          pickCount === 1 ? "" : "s"
+        } — no ranking, every pick counts the same. A row needs exactly that many checks (fewer if there aren't enough other students yet) or none before submitting.`}
       />
 
       <div style={{ display: "flex", alignItems: "flex-start", gap: 20 }}>
@@ -4069,16 +4093,14 @@ function TeamQuickFillGrid({ code }) {
           <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, display: "grid", gap: 6 }}>
             <span style={{ fontSize: 11, color: inkSoft, fontWeight: 700 }}>Auto fill every row</span>
             <div style={{ display: "flex", gap: 6 }}>
-              <Btn tone="ghost" onClick={() => autoFillRows("random")} disabled={rows.length < 4} full>
+              <Btn tone="ghost" onClick={() => autoFillRows("random")} disabled={rows.length < 2} full>
                 Random
               </Btn>
-              <Btn tone="ghost" onClick={() => autoFillRows("biased")} disabled={rows.length < 4} full>
+              <Btn tone="ghost" onClick={() => autoFillRows("biased")} disabled={rows.length < 2} full>
                 Biased
               </Btn>
             </div>
-            {rows.length > 0 && rows.length < 4 && (
-              <span style={{ fontSize: 10.5, color: inkSoft }}>Needs at least 4 students in the grid.</span>
-            )}
+            {rows.length > 0 && rows.length < 2 && <span style={{ fontSize: 10.5, color: inkSoft }}>Needs at least 2 students in the grid.</span>}
           </div>
 
           <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12, position: "relative" }}>
@@ -4146,7 +4168,7 @@ function TeamQuickFillGrid({ code }) {
             </Btn>
             {rows.some((r) => rowStatus(r) === "partial") && (
               <span style={{ fontSize: 11.5, color: clay, display: "flex", alignItems: "flex-start", gap: 5 }}>
-                <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} /> Every row needs exactly 3 picks or none before submitting.
+                <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} /> Every row needs exactly {requiredPicks} pick{requiredPicks === 1 ? "" : "s"} or none before submitting.
               </span>
             )}
             {submitMessage && (
@@ -7698,7 +7720,7 @@ function TeamGroupEditor({ code }) {
   const [tab, setTab] = useState("mailbox");
   const [requests, setRequests] = useState([]);
   const [members, setMembers] = useState([]);
-  const [pickedIds, setPickedIds] = useState(new Set()); // member ids who've submitted their 3 groupmate picks
+  const [pickedIds, setPickedIds] = useState(new Set()); // member ids who've submitted their groupmate picks
   const [picksByStudentId, setPicksByStudentId] = useState({}); // id -> full { choices, ... } pick record
   const [settings, setSettings] = useState(DEFAULT_TEAM_SPLIT_SETTINGS);
   const [loading, setLoading] = useState(true);
@@ -7745,6 +7767,15 @@ function TeamGroupEditor({ code }) {
 
   const activateSurvey = async () => {
     const updated = { ...group, surveyOpen: true };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
+  };
+
+  // A student is never actually asked for more than effectivePickCount lets them
+  // honor, so raising this beyond the current member count is fine to save — it just
+  // won't bite until enough students have joined for it to be possible.
+  const updatePickCount = async (count) => {
+    const updated = { ...group, pickCount: Math.max(1, Math.round(count) || 1) };
     setGroup(updated);
     await storeSet(`group:${code}`, updated, true);
   };
@@ -7933,44 +7964,57 @@ function TeamGroupEditor({ code }) {
 
       <div
         style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
           background: "#fff",
           border: `1px solid ${line}`,
           borderRadius: 9,
           padding: "10px 14px",
           marginBottom: 18,
+          display: "grid",
           gap: 10,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
-            style={{
-              fontFamily: mono,
-              fontSize: 11,
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-              padding: "3px 9px",
-              borderRadius: 5,
-              background: group.surveyOpen ? greenSoft : "#E4E9F1",
-              color: group.surveyOpen ? green : inkSoft,
-            }}
-          >
-            {group.surveyOpen ? "Survey open" : "Survey not open"}
-          </span>
-          <span style={{ fontSize: 12.5, color: inkSoft }}>
-            {group.surveyOpen
-              ? `Accepted students can name 3 groupmates they'd like to be placed with. ${pickedIds.size} of ${members.length} submitted.`
-              : "Once open, accepted students can each name 3 groupmates they'd like to be placed with. Join requests keep working either way."}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span
+              style={{
+                fontFamily: mono,
+                fontSize: 11,
+                fontWeight: 700,
+                textTransform: "uppercase",
+                letterSpacing: 0.5,
+                padding: "3px 9px",
+                borderRadius: 5,
+                background: group.surveyOpen ? greenSoft : "#E4E9F1",
+                color: group.surveyOpen ? green : inkSoft,
+              }}
+            >
+              {group.surveyOpen ? "Survey open" : "Survey not open"}
+            </span>
+            <span style={{ fontSize: 12.5, color: inkSoft }}>
+              {group.surveyOpen
+                ? `Accepted students can name ${group.pickCount} groupmate${group.pickCount === 1 ? "" : "s"} they'd like to be placed with. ${pickedIds.size} of ${members.length} submitted.`
+                : `Once open, accepted students can each name ${group.pickCount} groupmate${group.pickCount === 1 ? "" : "s"} they'd like to be placed with. Join requests keep working either way.`}
+            </span>
+          </div>
+          {!group.surveyOpen && (
+            <Btn onClick={activateSurvey}>
+              <Play size={14} /> Activate Survey
+            </Btn>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, borderTop: `1px solid ${line}`, paddingTop: 10 }}>
+          <span style={{ fontSize: 12, color: inkSoft }}>Groupmates each student picks:</span>
+          <input
+            type="number"
+            min={1}
+            value={group.pickCount}
+            onChange={(e) => updatePickCount(e.target.value)}
+            style={{ width: 52, border: `1px solid ${line}`, borderRadius: 6, padding: "4px 6px", fontFamily: mono, fontSize: 13, textAlign: "center" }}
+          />
+          <span style={{ fontSize: 11, color: inkSoft }}>
+            If a student has fewer than this many other teammates so far, they're only asked to pick from however many currently exist.
           </span>
         </div>
-        {!group.surveyOpen && (
-          <Btn onClick={activateSurvey}>
-            <Play size={14} /> Activate Survey
-          </Btn>
-        )}
       </div>
 
       {message && (
@@ -8688,10 +8732,14 @@ function StudentJoin({ onJoined }) {
 
 // ---------------- TEAM GROUP: STUDENT MEMBERSHIP ----------------
 // Shared read/write logic for a student's relationship to one team group — pending
-// request, accepted membership, and (once the teacher opens it) their 3 groupmate picks.
+// request, accepted membership, and (once the teacher opens it) their groupmate picks.
 // Used by both the full-page code-entry flow (TeamJoinScreen) and each team group's card
 // in the student's Active Groups list, so the two surfaces can't drift out of sync.
-function useTeamMembership(code, user) {
+// `pickCount` is the teacher's configured number to ask for; the number actually
+// required of this student (`requiredPicks`) is capped at however many other accepted
+// members currently exist, via effectivePickCount, so an ambitious pickCount never
+// creates a survey nobody can complete.
+function useTeamMembership(code, user, pickCount) {
   const myId = safeKey(user.email);
   const [memberRecord, setMemberRecord] = useState(null);
   const [requestRecord, setRequestRecord] = useState(null);
@@ -8701,6 +8749,7 @@ function useTeamMembership(code, user) {
   const [busy, setBusy] = useState(false);
   const [editingPicks, setEditingPicks] = useState(false);
   const [picks, setPicks] = useState([]);
+  const requiredPicks = effectivePickCount(pickCount, otherMembers.length);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -8748,10 +8797,10 @@ function useTeamMembership(code, user) {
   };
 
   const toggleChoice = (id) =>
-    setPicks((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 3 ? [...prev, id] : prev));
+    setPicks((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < requiredPicks ? [...prev, id] : prev));
 
   const submitPicks = async () => {
-    if (picks.length !== 3) return;
+    if (picks.length !== requiredPicks || requiredPicks === 0) return;
     setBusy(true);
     await storeSet(`team-picks:${code}:${myId}`, { id: myId, name: user.name, email: user.email, choices: picks, createdAt: Date.now() }, true);
     setBusy(false);
@@ -8771,6 +8820,7 @@ function useTeamMembership(code, user) {
     setEditingPicks,
     picks,
     setPicks,
+    requiredPicks,
     load,
     requestToJoin,
     cancelRequest,
@@ -8805,11 +8855,11 @@ function GroupmatePicker({ options, selected, onToggle, max = 3 }) {
 // ---------------- TEAM GROUP: STUDENT JOIN REQUEST (full page) ----------------
 // Reached by entering a team group's code on the Join tab. Covers every state a student
 // can be in: not yet requested, pending, accepted-but-survey-not-open, and (once the
-// teacher opens it) picking or reviewing their 3 groupmate choices.
+// teacher opens it) picking or reviewing their groupmate choices.
 function TeamJoinScreen({ code, user, onDone }) {
   const [group, setGroup] = useState(null);
   const [groupLoading, setGroupLoading] = useState(true);
-  const m = useTeamMembership(code, user);
+  const m = useTeamMembership(code, user, group?.pickCount || 3);
 
   useEffect(() => {
     (async () => {
@@ -8821,13 +8871,18 @@ function TeamJoinScreen({ code, user, onDone }) {
 
   if (groupLoading || m.loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
 
+  // Complete only if what's on file actually matches what's required right now — if the
+  // teacher raised the count, or more teammates joined since, a prior submission that's
+  // now short falls through to the picker instead of showing a stale "done" state.
+  const picksComplete = m.picksRecord && m.picksRecord.choices.length === m.requiredPicks;
+
   return (
     <div style={{ maxWidth: 420, margin: "0 auto" }}>
       <Header eyebrow="Team group" title={group.name} />
       <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 10, padding: 20 }}>
         {m.memberRecord ? (
           group.surveyOpen ? (
-            m.picksRecord && !m.editingPicks ? (
+            picksComplete && !m.editingPicks ? (
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, color: green, fontWeight: 700, fontSize: 15, marginBottom: 10 }}>
                   <Check size={18} /> Picks submitted
@@ -8845,17 +8900,21 @@ function TeamJoinScreen({ code, user, onDone }) {
             ) : (
               <div>
                 <p style={{ fontSize: 13.5, color: ink, marginBottom: 10 }}>
-                  Pick exactly 3 teammates you'd like to be placed with. All three count equally — there's no ranking.
+                  Pick exactly {m.requiredPicks} teammate{m.requiredPicks === 1 ? "" : "s"} you'd like to be placed with. They all count equally — there's no ranking.
                 </p>
-                {m.otherMembers.length < 3 ? (
-                  <p style={{ fontSize: 12.5, color: clay, marginBottom: 14 }}>
-                    Only {m.otherMembers.length} other student{m.otherMembers.length === 1 ? "" : "s"} joined so far — you need at least 3 to choose from before you can submit.
+                {m.requiredPicks < group.pickCount && m.otherMembers.length > 0 && (
+                  <p style={{ fontSize: 12, color: inkSoft, marginBottom: 10 }}>
+                    Your teacher asked for {group.pickCount}, but only {m.otherMembers.length} other student{m.otherMembers.length === 1 ? "" : "s"} joined so
+                    far — pick {m.requiredPicks} for now.
                   </p>
+                )}
+                {m.otherMembers.length === 0 ? (
+                  <p style={{ fontSize: 12.5, color: clay, marginBottom: 14 }}>No other teammates have joined yet — nothing to pick.</p>
                 ) : (
-                  <GroupmatePicker options={m.otherMembers} selected={m.picks} onToggle={m.toggleChoice} />
+                  <GroupmatePicker options={m.otherMembers} selected={m.picks} onToggle={m.toggleChoice} max={m.requiredPicks} />
                 )}
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <Btn onClick={m.submitPicks} disabled={m.busy || m.picks.length !== 3}>
+                  <Btn onClick={m.submitPicks} disabled={m.busy || m.picks.length !== m.requiredPicks || m.requiredPicks === 0}>
                     {m.busy ? "Submitting…" : "Submit picks"}
                   </Btn>
                   {m.picksRecord && (
@@ -8863,7 +8922,9 @@ function TeamJoinScreen({ code, user, onDone }) {
                       Cancel
                     </Btn>
                   )}
-                  <span style={{ fontSize: 12, color: inkSoft }}>{m.picks.length}/3 selected</span>
+                  <span style={{ fontSize: 12, color: inkSoft }}>
+                    {m.picks.length}/{m.requiredPicks} selected
+                  </span>
                 </div>
               </div>
             )
@@ -8917,7 +8978,8 @@ function TeamJoinScreen({ code, user, onDone }) {
 // instead of as its own page, so a student never has to re-enter the code to check status
 // or fill out the groupmate survey once it's open.
 function TeamActiveGroupCard({ g, user }) {
-  const m = useTeamMembership(g.code, user);
+  const m = useTeamMembership(g.code, user, g.pickCount || 3);
+  const picksComplete = m.picksRecord && m.picksRecord.choices.length === m.requiredPicks;
 
   return (
     <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: "12px 14px" }}>
@@ -8944,7 +9006,7 @@ function TeamActiveGroupCard({ g, user }) {
         <p style={{ color: inkSoft, fontSize: 12.5, marginTop: 6 }}>Loading…</p>
       ) : m.memberRecord ? (
         g.surveyOpen ? (
-          m.picksRecord && !m.editingPicks ? (
+          picksComplete && !m.editingPicks ? (
             <div style={{ marginTop: 8 }}>
               <div style={{ fontSize: 12.5, color: green, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
                 <Check size={13} /> Picks submitted
@@ -8957,17 +9019,20 @@ function TeamActiveGroupCard({ g, user }) {
           ) : (
             <div style={{ marginTop: 8 }}>
               <p style={{ fontSize: 12.5, color: inkSoft, marginBottom: 8 }}>
-                Pick exactly 3 teammates you'd like to be placed with — no ranking, all three count equally.
+                Pick exactly {m.requiredPicks} teammate{m.requiredPicks === 1 ? "" : "s"} you'd like to be placed with — no ranking, they all count equally.
               </p>
-              {m.otherMembers.length < 3 ? (
-                <p style={{ fontSize: 12, color: clay, marginBottom: 8 }}>
-                  Only {m.otherMembers.length} other student{m.otherMembers.length === 1 ? "" : "s"} joined so far — need at least 3 to choose from.
+              {m.requiredPicks < (g.pickCount || 3) && m.otherMembers.length > 0 && (
+                <p style={{ fontSize: 11.5, color: inkSoft, marginBottom: 8 }}>
+                  Your teacher asked for {g.pickCount}, but only {m.otherMembers.length} other student{m.otherMembers.length === 1 ? "" : "s"} joined so far.
                 </p>
+              )}
+              {m.otherMembers.length === 0 ? (
+                <p style={{ fontSize: 12, color: clay, marginBottom: 8 }}>No other teammates have joined yet — nothing to pick.</p>
               ) : (
-                <GroupmatePicker options={m.otherMembers} selected={m.picks} onToggle={m.toggleChoice} />
+                <GroupmatePicker options={m.otherMembers} selected={m.picks} onToggle={m.toggleChoice} max={m.requiredPicks} />
               )}
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <Btn onClick={m.submitPicks} disabled={m.busy || m.picks.length !== 3}>
+                <Btn onClick={m.submitPicks} disabled={m.busy || m.picks.length !== m.requiredPicks || m.requiredPicks === 0}>
                   {m.busy ? "Submitting…" : "Submit picks"}
                 </Btn>
                 {m.picksRecord && (
@@ -8975,7 +9040,9 @@ function TeamActiveGroupCard({ g, user }) {
                     Cancel
                   </Btn>
                 )}
-                <span style={{ fontSize: 11.5, color: inkSoft }}>{m.picks.length}/3</span>
+                <span style={{ fontSize: 11.5, color: inkSoft }}>
+                  {m.picks.length}/{m.requiredPicks}
+                </span>
               </div>
             </div>
           )
