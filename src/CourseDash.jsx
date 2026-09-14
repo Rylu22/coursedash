@@ -329,6 +329,7 @@ function explainPlacement({ student, courseId, courses, allStudents, priority, s
 const TEACHER_DELETE_UNDO_MS = 5 * 60 * 1000;
 
 const DEFAULT_LOGIC_SETTINGS = {
+  collectGrade: true, // whether the student survey even asks for a grade — off also forces useGrade off
   useGrade: true,
   usePreference: true,
   useHistory: true,
@@ -3169,6 +3170,7 @@ function TestGroupsSection({ groups, selected, onToggle, onToggleAll, onOpenQuic
 // teacher exactly like a real response.
 function QuickFillGrid({ code }) {
   const [group, setGroup] = useState(null);
+  const [settings, setSettings] = useState(DEFAULT_LOGIC_SETTINGS);
   const [rows, setRows] = useState([]);
   const [allTestStudents, setAllTestStudents] = useState([]);
   const [showAddPicker, setShowAddPicker] = useState(false);
@@ -3194,6 +3196,7 @@ function QuickFillGrid({ code }) {
     setLoading(true);
     const g = normalizeGroup(await storeGet(`group:${code}`, true));
     setGroup(g);
+    if (g) setSettings(await loadLogicSettingsForGroup(g));
     const userKeys = await storeList("user:", true);
     const users = (await Promise.all(userKeys.map((k) => storeGet(k, true)))).filter(Boolean);
     const testStudents = users.filter((u) => u.isTest && u.role === "student");
@@ -3271,25 +3274,29 @@ function QuickFillGrid({ code }) {
     setCreatingStudent(false);
   };
 
-  // Creates `count` fresh test students and adds them all as rows in one undo step.
-  // Each createTestAccount call needs to see the ones already created in this same
-  // batch (not just `allTestStudents` from before the batch started), or every call
-  // would compute the same next-free letter label and collide.
+  // Adds `count` students to the grid, reusing existing not-yet-added test students
+  // first (in the same length-then-alphabetical order the picker list already shows)
+  // and only creating brand new accounts for however many more are needed beyond that.
+  // Each createTestAccount call for the new ones needs to see the ones already created
+  // in this same batch (not just `allTestStudents` from before the batch started), or
+  // every call would compute the same next-free letter label and collide.
   const addManyNewStudents = async (count) => {
     const n = Math.max(1, Math.min(200, Math.round(count) || 0));
     if (!n) return;
     setCreatingStudent(true);
+    const reused = availableStudents.slice(0, n);
+    const toCreate = n - reused.length;
     let pool = allTestStudents;
     const created = [];
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < toCreate; i++) {
       const record = await createTestAccount("student", pool);
       pool = [...pool, record];
       created.push(record);
     }
-    setAllTestStudents(pool);
+    if (created.length) setAllTestStudents(pool);
     updateRows((prev) => [
       ...prev,
-      ...created.map((s) => ({ studentId: safeKey(s.email), name: s.name, email: s.email, grade: "", assignments: {}, extraAnswers: {} })),
+      ...[...reused, ...created].map((s) => ({ studentId: safeKey(s.email), name: s.name, email: s.email, grade: "", assignments: {}, extraAnswers: {} })),
     ]);
     setCreatingStudent(false);
     setShowAddPicker(false);
@@ -3344,10 +3351,13 @@ function QuickFillGrid({ code }) {
 
   const rowStatus = (row) => {
     const assignedCount = Object.keys(row.assignments).length;
-    const hasGrade = row.grade !== "" && row.grade != null;
+    const gradeEntered = row.grade !== "" && row.grade != null;
+    // When grade isn't being collected at all, treat it as a non-factor in both
+    // directions: never blocks "full", and never counts toward "empty" either.
+    const hasGrade = !settings.collectGrade || gradeEntered;
     const anyExtraAnswered = Object.values(row.extraAnswers || {}).some((v) => (v || "").trim());
     const missingRequired = requiredQuestions.some((q) => !(row.extraAnswers?.[q.id] || "").trim());
-    if (assignedCount === 0 && !hasGrade && !anyExtraAnswered) return "empty";
+    if (assignedCount === 0 && !(settings.collectGrade && gradeEntered) && !anyExtraAnswered) return "empty";
     if (assignedCount === choiceCount && hasGrade && !missingRequired) return "full";
     return "partial";
   };
@@ -3364,7 +3374,15 @@ function QuickFillGrid({ code }) {
         const key = `submission:${code}:${r.studentId}`;
         await storeSet(
           key,
-          { id: r.studentId, name: r.name, email: r.email, grade: Number(r.grade), prefs, extraAnswers: r.extraAnswers || {}, createdAt: r.createdAt || Date.now() },
+          {
+            id: r.studentId,
+            name: r.name,
+            email: r.email,
+            grade: settings.collectGrade ? Number(r.grade) : null,
+            prefs,
+            extraAnswers: r.extraAnswers || {},
+            createdAt: r.createdAt || Date.now(),
+          },
           true
         );
         // Same index StudentSurvey maintains, so this shows up in the student's own Active Groups tab too.
@@ -3550,7 +3568,7 @@ function QuickFillGrid({ code }) {
                   <th style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 200 }}>
                     Student
                   </th>
-                  <th style={{ borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 70 }}>Grade</th>
+                  {settings.collectGrade && <th style={{ borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 70 }}>Grade</th>}
                   {courses.map((c) => (
                     <th
                       key={c.id}
@@ -3583,15 +3601,17 @@ function QuickFillGrid({ code }) {
                           <span style={{ fontWeight: 600 }}>{r.name}</span>
                         </span>
                       </td>
-                      <td style={{ borderBottom: `1px solid ${line}`, padding: "8px 12px" }}>
-                        <input
-                          type="number"
-                          value={r.grade}
-                          onChange={(e) => setGradeFor(r.studentId, e.target.value)}
-                          placeholder="9"
-                          style={{ width: 48, border: `1px solid ${line}`, borderRadius: 6, padding: "4px 6px", fontFamily: mono, fontSize: 13, textAlign: "center" }}
-                        />
-                      </td>
+                      {settings.collectGrade && (
+                        <td style={{ borderBottom: `1px solid ${line}`, padding: "8px 12px" }}>
+                          <input
+                            type="number"
+                            value={r.grade}
+                            onChange={(e) => setGradeFor(r.studentId, e.target.value)}
+                            placeholder="9"
+                            style={{ width: 48, border: `1px solid ${line}`, borderRadius: 6, padding: "4px 6px", fontFamily: mono, fontSize: 13, textAlign: "center" }}
+                          />
+                        </td>
+                      )}
                       {courses.map((c) => {
                         const rank = r.assignments[c.id];
                         const cellKey = `${r.studentId}:${c.id}`;
@@ -3672,7 +3692,7 @@ function QuickFillGrid({ code }) {
                 })}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={courses.length + extraQuestions.length + 3} style={{ padding: "18px 12px", color: inkSoft, fontSize: 13 }}>
+                    <td colSpan={courses.length + extraQuestions.length + (settings.collectGrade ? 3 : 2)} style={{ padding: "18px 12px", color: inkSoft, fontSize: 13 }}>
                       No students added yet — use "Add test student" in the sidebar.
                     </td>
                   </tr>
@@ -3790,22 +3810,26 @@ function TeamQuickFillGrid({ code }) {
     setCreatingStudent(false);
   };
 
-  // Creates `count` fresh test students and adds them all as rows in one undo step —
-  // each createTestAccount call needs to see the ones already created in this same
-  // batch, or every call would compute the same next-free letter label and collide.
+  // Adds `count` students to the grid, reusing existing not-yet-added test students
+  // first and only creating brand new accounts for however many more are needed beyond
+  // that. Each createTestAccount call for the new ones needs to see the ones already
+  // created in this same batch, or every call would compute the same next-free letter
+  // label and collide.
   const addManyNewStudents = async (count) => {
     const n = Math.max(1, Math.min(200, Math.round(count) || 0));
     if (!n) return;
     setCreatingStudent(true);
+    const reused = availableStudents.slice(0, n);
+    const toCreate = n - reused.length;
     let pool = allTestStudents;
     const created = [];
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < toCreate; i++) {
       const record = await createTestAccount("student", pool);
       pool = [...pool, record];
       created.push(record);
     }
-    setAllTestStudents(pool);
-    updateRows((prev) => [...prev, ...created.map((s) => ({ studentId: safeKey(s.email), name: s.name, email: s.email, picks: [] }))]);
+    if (created.length) setAllTestStudents(pool);
+    updateRows((prev) => [...prev, ...[...reused, ...created].map((s) => ({ studentId: safeKey(s.email), name: s.name, email: s.email, picks: [] }))]);
     setCreatingStudent(false);
     setShowAddPicker(false);
     setBulkAddCount("");
@@ -4067,6 +4091,7 @@ function TeamQuickFillGrid({ code }) {
 // no inputs, no add/remove, no submit. Purely a read-only snapshot.
 function TeacherResponsesGrid({ code }) {
   const [group, setGroup] = useState(null);
+  const [settings, setSettings] = useState(DEFAULT_LOGIC_SETTINGS);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -4074,6 +4099,7 @@ function TeacherResponsesGrid({ code }) {
     setLoading(true);
     const g = normalizeGroup(await storeGet(`group:${code}`, true));
     setGroup(g);
+    if (g) setSettings(await loadLogicSettingsForGroup(g));
     const subKeys = await storeList(`submission:${code}:`, true);
     const subs = (await Promise.all(subKeys.map((k) => storeGet(k, true)))).filter(Boolean);
     const loadedRows = subs
@@ -4136,7 +4162,7 @@ function TeacherResponsesGrid({ code }) {
                 <th style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 200 }}>
                   Student
                 </th>
-                <th style={{ borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 70 }}>Grade</th>
+                {settings.collectGrade && <th style={{ borderBottom: `1px solid ${line}`, padding: "10px 12px", textAlign: "left", minWidth: 70 }}>Grade</th>}
                 {courses.map((c) => (
                   <th
                     key={c.id}
@@ -4162,7 +4188,9 @@ function TeacherResponsesGrid({ code }) {
                   <td style={{ position: "sticky", left: 0, background: "#fff", borderBottom: `1px solid ${line}`, padding: "8px 12px", fontSize: 13, fontWeight: 600 }}>
                     {r.name}
                   </td>
-                  <td style={{ borderBottom: `1px solid ${line}`, padding: "8px 12px", fontFamily: mono, fontSize: 13, color: inkSoft }}>{r.grade}</td>
+                  {settings.collectGrade && (
+                    <td style={{ borderBottom: `1px solid ${line}`, padding: "8px 12px", fontFamily: mono, fontSize: 13, color: inkSoft }}>{r.grade}</td>
+                  )}
                   {courses.map((c) => {
                     const rank = r.assignments[c.id];
                     const landed = landedCourseByStudent[r.studentId] === c.id;
@@ -6332,16 +6360,20 @@ function GroupEditor({ code, onOpenGrid }) {
 
   const exportCSV = () => {
     if (!result) return;
-    const rows = [["Course", "Scaled Seats", "Target (entered)", "Student", "Grade", "Choice Granted", "History Priority"]];
+    const rows = [
+      ["Course", "Scaled Seats", "Target (entered)", "Student", ...(runSettings.collectGrade ? ["Grade"] : []), "Choice Granted", "History Priority"],
+    ];
     courses.forEach((c) => {
       const seats = result.capacity?.[c.id] ?? c.target;
       (result.assignments[c.id] || [])
         .slice()
-        .sort((a, b) => b.grade - a.grade || a.name.localeCompare(b.name))
-        .forEach((s) => rows.push([c.name, seats, c.target, s.name, s.grade, s.choiceRank, priority[s.id]?.[c.name] || 0]));
+        .sort((a, b) => (runSettings.collectGrade ? b.grade - a.grade : 0) || a.name.localeCompare(b.name))
+        .forEach((s) =>
+          rows.push([c.name, seats, c.target, s.name, ...(runSettings.collectGrade ? [s.grade] : []), s.choiceRank, priority[s.id]?.[c.name] || 0])
+        );
     });
     result.unassigned.forEach((s) =>
-      rows.push(["Unassigned", "", "", s.name, s.grade, "", Math.max(0, ...Object.values(priority[s.id] || {}))])
+      rows.push(["Unassigned", "", "", s.name, ...(runSettings.collectGrade ? [s.grade] : []), "", Math.max(0, ...Object.values(priority[s.id] || {}))])
     );
     const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -6786,7 +6818,7 @@ function GroupEditor({ code, onOpenGrid }) {
                 </div>
                 <select value={studentSort} onChange={(e) => setStudentSort(e.target.value)} style={{ ...inputStyle, width: "auto", fontSize: 13 }}>
                   <option value="name">Sort: Name (A–Z)</option>
-                  <option value="grade">Sort: Grade</option>
+                  {settings.collectGrade && <option value="grade">Sort: Grade</option>}
                   <option value="choice1">Sort: 1st choice</option>
                   <option value="choice2">Sort: 2nd choice</option>
                   <option value="choice3">Sort: 3rd choice</option>
@@ -6830,7 +6862,7 @@ function GroupEditor({ code, onOpenGrid }) {
                           )}
                         </span>
                         <PriorityBadge scores={priority[s.id]} />
-                        <span style={{ fontFamily: mono, color: inkSoft, fontSize: 12 }}>Grade {s.grade}</span>
+                        {settings.collectGrade && <span style={{ fontFamily: mono, color: inkSoft, fontSize: 12 }}>Grade {s.grade}</span>}
                         <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>
                           {s.prefs.map((p, i) => courses.find((c) => c.id === p)?.name || "—").join("  →  ")}
                         </span>
@@ -6884,9 +6916,11 @@ function GroupEditor({ code, onOpenGrid }) {
                               )}
                             </div>
                           </div>
-                          <div style={{ fontSize: 12.5 }}>
-                            <strong>Grade:</strong> {s.grade}
-                          </div>
+                          {settings.collectGrade && (
+                            <div style={{ fontSize: 12.5 }}>
+                              <strong>Grade:</strong> {s.grade}
+                            </div>
+                          )}
                           <div style={{ fontSize: 12.5 }}>
                             <strong>Ranked choices:</strong>
                             <ol style={{ margin: "4px 0 0", paddingLeft: 18 }}>
@@ -6933,6 +6967,13 @@ function GroupEditor({ code, onOpenGrid }) {
             </p>
 
             <Toggle
+              label="Ask for grade"
+              description="Include a grade field in the student survey. Turning this off also turns off Grade priority below, since there'd be no grade data to use."
+              checked={settings.collectGrade}
+              onChange={(v) => updateSetting({ collectGrade: v, useGrade: v ? settings.useGrade : false })}
+            />
+
+            <Toggle
               label="Preference order"
               description="Fill courses using students' ranked choices. Off = ignore rankings and place students into any open course."
               checked={settings.usePreference}
@@ -6941,9 +6982,14 @@ function GroupEditor({ code, onOpenGrid }) {
 
             <Toggle
               label="Grade priority"
-              description="When a course has more applicants than seats, one grade level gets priority."
+              description={
+                settings.collectGrade
+                  ? "When a course has more applicants than seats, one grade level gets priority."
+                  : "Turn on \"Ask for grade\" above first — this needs grade data to work."
+              }
               checked={settings.useGrade}
               onChange={(v) => updateSetting({ useGrade: v })}
+              disabled={!settings.collectGrade}
             />
             {settings.useGrade && (
               <div style={{ display: "flex", gap: 8, padding: "0 0 12px 0" }}>
@@ -7224,7 +7270,7 @@ function GroupEditor({ code, onOpenGrid }) {
                                     {!group.resultsFinalized && <GripVertical size={11} style={{ opacity: 0.4, marginRight: 4, verticalAlign: "-1px" }} />}
                                     {displayNameFor(s.id, s.name)} <PriorityBadge scores={priority[s.id]} courseName={c.name} />
                                   </td>
-                                  <td style={{ padding: "6px 8px", color: inkSoft }}>Grade {s.grade}</td>
+                                  {runSettings.collectGrade && <td style={{ padding: "6px 8px", color: inkSoft }}>Grade {s.grade}</td>}
                                   <td style={{ padding: "6px 14px", textAlign: "right" }}>
                                     <span
                                       style={{
@@ -7298,7 +7344,7 @@ function GroupEditor({ code, onOpenGrid }) {
                                   {!group.resultsFinalized && <GripVertical size={11} style={{ opacity: 0.4, marginRight: 4, verticalAlign: "-1px" }} />}
                                   {displayNameFor(s.id, s.name)} <PriorityBadge scores={priority[s.id]} />
                                 </td>
-                                <td style={{ padding: "6px 8px", color: inkSoft }}>Grade {s.grade}</td>
+                                {runSettings.collectGrade && <td style={{ padding: "6px 8px", color: inkSoft }}>Grade {s.grade}</td>}
                                 <td style={{ padding: "6px 14px", textAlign: "right", color: inkSoft }}>
                                   {s.manual ? "manually unassigned" : "no room in any of their choices"}
                                 </td>
@@ -7392,7 +7438,8 @@ function GroupEditor({ code, onOpenGrid }) {
                     <div style={{ borderTop: `1px solid ${line}`, paddingTop: 10 }}>
                       <div style={{ fontWeight: 700, marginBottom: 4 }}>Tie-break logic active this run</div>
                       <div style={{ color: inkSoft, fontSize: 12.5 }}>
-                        Grade priority: {runSettings.useGrade ? `on (${gradeDirectionLabel(runSettings)})` : "off"} — this student is grade {s.grade}
+                        Grade priority: {runSettings.useGrade ? `on (${gradeDirectionLabel(runSettings)})` : "off"}
+                        {runSettings.collectGrade ? ` — this student is grade ${s.grade}` : ""}
                         <br />
                         History priority: {runSettings.useHistory ? `on (${runSettings.historyMode})` : "off"}
                         {runSettings.useHistory && info.course ? ` — worth +${info.historyScore} for this course` : ""}
@@ -8793,6 +8840,7 @@ function TeamActiveGroupCard({ g, user }) {
 // ---------------- STUDENT SURVEY ----------------
 function StudentSurvey({ code, user, onDone }) {
   const [group, setGroup] = useState(null);
+  const [settings, setSettings] = useState(DEFAULT_LOGIC_SETTINGS);
   const [grade, setGrade] = useState("");
   const [prefs, setPrefs] = useState(["", "", ""]);
   const [extraAnswers, setExtraAnswers] = useState({}); // questionId -> answer text
@@ -8805,10 +8853,11 @@ function StudentSurvey({ code, user, onDone }) {
     (async () => {
       const g = normalizeGroup(await storeGet(`group:${code}`, true));
       setGroup(g);
+      if (g) setSettings(await loadLogicSettingsForGroup(g));
       const existing = await storeGet(`submission:${code}:${safeKey(user.email)}`, true);
       if (existing) {
         setIsEdit(true);
-        setGrade(String(existing.grade));
+        setGrade(existing.grade != null ? String(existing.grade) : "");
         setPrefs([...existing.prefs, "", ""].slice(0, 3));
         setExtraAnswers(existing.extraAnswers || {});
         setCreatedAt(existing.createdAt || null);
@@ -8828,7 +8877,7 @@ function StudentSurvey({ code, user, onDone }) {
   const submit = async () => {
     setError("");
     if (group.status !== "active") return setError("This group is no longer accepting responses.");
-    if (!grade) return setError("Enter your grade.");
+    if (settings.collectGrade && !grade) return setError("Enter your grade.");
     const chosen = prefs.slice(0, choiceCount);
     if (chosen.some((p) => !p)) return setError(`Choose all ${choiceCount} courses, in order of preference.`);
     if (new Set(chosen).size < choiceCount) return setError(`Choose ${choiceCount} different courses.`);
@@ -8838,7 +8887,15 @@ function StudentSurvey({ code, user, onDone }) {
     const key = `submission:${code}:${safeKey(user.email)}`;
     await storeSet(
       key,
-      { id: safeKey(user.email), name: user.name, email: user.email, grade: Number(grade), prefs: chosen, extraAnswers, createdAt: createdAt || Date.now() },
+      {
+        id: safeKey(user.email),
+        name: user.name,
+        email: user.email,
+        grade: settings.collectGrade ? Number(grade) : null,
+        prefs: chosen,
+        extraAnswers,
+        createdAt: createdAt || Date.now(),
+      },
       true
     );
     // Track which groups this student has responded to, so their "Active Groups"
@@ -8860,9 +8917,11 @@ function StudentSurvey({ code, user, onDone }) {
         sub={isEdit ? "You've already responded to this group — submitting again replaces your previous choices." : "Choice 1 is your favorite. Courses fill from choice 1 first."}
       />
       <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 10, padding: 20 }}>
-        <Field label="Your grade">
-          <input style={inputStyle} type="number" value={grade} onChange={(e) => setGrade(e.target.value)} placeholder="9" />
-        </Field>
+        {settings.collectGrade && (
+          <Field label="Your grade">
+            <input style={inputStyle} type="number" value={grade} onChange={(e) => setGrade(e.target.value)} placeholder="9" />
+          </Field>
+        )}
         {Array.from({ length: choiceCount }, (_, i) => i).map((i) => (
           <Field key={i} label={`Choice ${i + 1}`}>
             <select style={inputStyle} value={prefs[i]} onChange={(e) => setPref(i, e.target.value)}>
