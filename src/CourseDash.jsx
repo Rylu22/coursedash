@@ -63,6 +63,14 @@ async function createTestAccount(role, existingTestUsers) {
   await storeSet(`user:${safeKey(email)}`, record, true);
   return record;
 }
+// Test-account names carry a spreadsheet-style letter suffix (Student A, B, ... Z, AA,
+// AB, ...), so plain alphabetical order wrongly interleaves "AA" between "A" and "B".
+// Sorting by name length first keeps every single-letter name ahead of every two-letter
+// one, matching the actual A→Z→AA→AB→... sequence; names of the same length still break
+// ties alphabetically.
+function compareTestName(a, b) {
+  return a.name.length - b.name.length || a.name.localeCompare(b.name);
+}
 
 // Data model: everything lives in one Postgres table, `kv_store(key text primary
 // key, value jsonb)`, mirroring the original window.storage key/value shape so the
@@ -1781,11 +1789,10 @@ function TestAccountSidebar({ currentUser, onSwitch }) {
 
   const q = search.trim().toLowerCase();
   const matches = (u) => !q || u.name.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q);
-  const byName = (a, b) => a.name.localeCompare(b.name);
   const allTeachers = (testUsers || []).filter((u) => u.role === "teacher");
   const allStudents = (testUsers || []).filter((u) => u.role === "student");
-  const teachers = allTeachers.filter(matches).sort(byName);
-  const students = allStudents.filter(matches).sort(byName);
+  const teachers = allTeachers.filter(matches).sort(compareTestName);
+  const students = allStudents.filter(matches).sort(compareTestName);
 
   const renderGroup = (title, users, hasAny) => (
     <div style={{ marginBottom: 14 }}>
@@ -2882,9 +2889,8 @@ function AdminTesting({ onEnterAccount, onOpenQuickFill, onOpenTeamQuickFill }) 
     load();
   };
 
-  const byName = (a, b) => a.name.localeCompare(b.name);
-  const teachers = (testUsers || []).filter((u) => u.role === "teacher").sort(byName);
-  const students = (testUsers || []).filter((u) => u.role === "student").sort(byName);
+  const teachers = (testUsers || []).filter((u) => u.role === "teacher").sort(compareTestName);
+  const students = (testUsers || []).filter((u) => u.role === "student").sort(compareTestName);
   const selectedCount = selectedAccounts.size + selectedGroups.size;
 
   return (
@@ -3084,6 +3090,7 @@ function QuickFillGrid({ code }) {
   const [allTestStudents, setAllTestStudents] = useState([]);
   const [showAddPicker, setShowAddPicker] = useState(false);
   const [creatingStudent, setCreatingStudent] = useState(false);
+  const [bulkAddCount, setBulkAddCount] = useState("");
   // { rank, origin: {studentId, courseId} | null } while a box is being dragged —
   // origin is set when the drag started from an already-placed box on the grid
   // (so its old cell gets cleared on drop), and null when dragged from the corner palette.
@@ -3141,7 +3148,7 @@ function QuickFillGrid({ code }) {
   const courses = group?.courses || [];
   const choiceCount = group ? Math.max(2, Math.min(3, courses.length)) : 3;
   const addedIds = new Set(rows.map((r) => r.studentId));
-  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email))).sort((a, b) => a.name.localeCompare(b.name));
+  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email))).sort(compareTestName);
 
   // Every row-changing action goes through here instead of setRows directly, so it
   // can be undone. Caps history at 50 steps so the stack can't grow unbounded.
@@ -3179,6 +3186,31 @@ function QuickFillGrid({ code }) {
     setAllTestStudents((prev) => [...prev, record]);
     addStudentRow(record);
     setCreatingStudent(false);
+  };
+
+  // Creates `count` fresh test students and adds them all as rows in one undo step.
+  // Each createTestAccount call needs to see the ones already created in this same
+  // batch (not just `allTestStudents` from before the batch started), or every call
+  // would compute the same next-free letter label and collide.
+  const addManyNewStudents = async (count) => {
+    const n = Math.max(1, Math.min(200, Math.round(count) || 0));
+    if (!n) return;
+    setCreatingStudent(true);
+    let pool = allTestStudents;
+    const created = [];
+    for (let i = 0; i < n; i++) {
+      const record = await createTestAccount("student", pool);
+      pool = [...pool, record];
+      created.push(record);
+    }
+    setAllTestStudents(pool);
+    updateRows((prev) => [
+      ...prev,
+      ...created.map((s) => ({ studentId: safeKey(s.email), name: s.name, email: s.email, grade: "", assignments: {}, extraAnswers: {} })),
+    ]);
+    setCreatingStudent(false);
+    setShowAddPicker(false);
+    setBulkAddCount("");
   };
 
   const removeRow = (studentId) => updateRows((prev) => prev.filter((r) => r.studentId !== studentId));
@@ -3374,6 +3406,25 @@ function QuickFillGrid({ code }) {
                   <Btn onClick={addNewStudent} disabled={creatingStudent} full>
                     <Plus size={13} /> {creatingStudent ? "Creating…" : "New test student"}
                   </Btn>
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={bulkAddCount}
+                      onChange={(e) => setBulkAddCount(e.target.value)}
+                      placeholder="#"
+                      style={{ width: 44, border: `1px solid ${line}`, borderRadius: 6, padding: "5px 6px", fontFamily: mono, fontSize: 13, textAlign: "center" }}
+                    />
+                    <Btn
+                      tone="ghost"
+                      onClick={() => addManyNewStudents(Number(bulkAddCount))}
+                      disabled={creatingStudent || !bulkAddCount || Number(bulkAddCount) < 1}
+                      full
+                    >
+                      {creatingStudent ? "Adding…" : "Add that many"}
+                    </Btn>
+                  </div>
                   {availableStudents.length > 0 && (
                     <div style={{ marginTop: 8, display: "grid", gap: 2, maxHeight: 220, overflowY: "auto" }}>
                       {availableStudents.map((u) => (
@@ -3566,6 +3617,7 @@ function TeamQuickFillGrid({ code }) {
   const [allTestStudents, setAllTestStudents] = useState([]);
   const [showAddPicker, setShowAddPicker] = useState(false);
   const [creatingStudent, setCreatingStudent] = useState(false);
+  const [bulkAddCount, setBulkAddCount] = useState("");
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
   const [submitting, setSubmitting] = useState(false);
@@ -3617,7 +3669,7 @@ function TeamQuickFillGrid({ code }) {
   }, [load]);
 
   const addedIds = new Set(rows.map((r) => r.studentId));
-  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email))).sort((a, b) => a.name.localeCompare(b.name));
+  const availableStudents = allTestStudents.filter((u) => !addedIds.has(safeKey(u.email))).sort(compareTestName);
 
   const updateRows = (updater) => {
     const next = typeof updater === "function" ? updater(rows) : updater;
@@ -3653,6 +3705,27 @@ function TeamQuickFillGrid({ code }) {
     setAllTestStudents((prev) => [...prev, record]);
     addStudentRow(record);
     setCreatingStudent(false);
+  };
+
+  // Creates `count` fresh test students and adds them all as rows in one undo step —
+  // each createTestAccount call needs to see the ones already created in this same
+  // batch, or every call would compute the same next-free letter label and collide.
+  const addManyNewStudents = async (count) => {
+    const n = Math.max(1, Math.min(200, Math.round(count) || 0));
+    if (!n) return;
+    setCreatingStudent(true);
+    let pool = allTestStudents;
+    const created = [];
+    for (let i = 0; i < n; i++) {
+      const record = await createTestAccount("student", pool);
+      pool = [...pool, record];
+      created.push(record);
+    }
+    setAllTestStudents(pool);
+    updateRows((prev) => [...prev, ...created.map((s) => ({ studentId: safeKey(s.email), name: s.name, email: s.email, picks: [] }))]);
+    setCreatingStudent(false);
+    setShowAddPicker(false);
+    setBulkAddCount("");
   };
 
   // Also drops the removed student from everyone else's picks, so no row is left
@@ -3758,6 +3831,25 @@ function TeamQuickFillGrid({ code }) {
                 <Btn onClick={addNewStudent} disabled={creatingStudent} full>
                   <Plus size={13} /> {creatingStudent ? "Creating…" : "New test student"}
                 </Btn>
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={bulkAddCount}
+                    onChange={(e) => setBulkAddCount(e.target.value)}
+                    placeholder="#"
+                    style={{ width: 44, border: `1px solid ${line}`, borderRadius: 6, padding: "5px 6px", fontFamily: mono, fontSize: 13, textAlign: "center" }}
+                  />
+                  <Btn
+                    tone="ghost"
+                    onClick={() => addManyNewStudents(Number(bulkAddCount))}
+                    disabled={creatingStudent || !bulkAddCount || Number(bulkAddCount) < 1}
+                    full
+                  >
+                    {creatingStudent ? "Adding…" : "Add that many"}
+                  </Btn>
+                </div>
                 {availableStudents.length > 0 && (
                   <div style={{ marginTop: 8, display: "grid", gap: 2, maxHeight: 220, overflowY: "auto" }}>
                     {availableStudents.map((u) => (
