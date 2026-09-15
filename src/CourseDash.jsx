@@ -8012,15 +8012,15 @@ function TeamGroupEditor({ code }) {
   const [explainFor, setExplainFor] = useState(null); // { student, teamIndex }
   const [chain, setChain] = useState(null);
   const [priorGroupOptions, setPriorGroupOptions] = useState([]); // [{code, name}] for this series, most recent first
+  const [expandedMember, setExpandedMember] = useState(null); // member id currently expanded in the Students list
+  const [memberSearch, setMemberSearch] = useState("");
+  const [memberSort, setMemberSort] = useState("name"); // name | picks | joined
+  const [loadingMembers, setLoadingMembers] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    const g = normalizeGroup(await storeGet(`group:${code}`, true));
-    setGroup(g);
-    const reqKeys = await storeList(`team-request:${code}:`, true);
-    const reqs = (await Promise.all(reqKeys.map((k) => storeGet(k, true)))).filter(Boolean);
-    reqs.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-    setRequests(reqs);
+  // Just the members/picks portion of `load` — split out so the Students tab's Refresh
+  // button can pull the latest without triggering the whole-page "Loading…" state.
+  const loadMembers = useCallback(async () => {
+    setLoadingMembers(true);
     const memberKeys = await storeList(`team-member:${code}:`, true);
     const mems = (await Promise.all(memberKeys.map((k) => storeGet(k, true)))).filter(Boolean);
     mems.sort((a, b) => a.name.localeCompare(b.name));
@@ -8033,6 +8033,18 @@ function TeamGroupEditor({ code }) {
     });
     setPicksByStudentId(picksById);
     setPickedIds(new Set(picksList.map((p) => p.id)));
+    setLoadingMembers(false);
+  }, [code]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const g = normalizeGroup(await storeGet(`group:${code}`, true));
+    setGroup(g);
+    const reqKeys = await storeList(`team-request:${code}:`, true);
+    const reqs = (await Promise.all(reqKeys.map((k) => storeGet(k, true)))).filter(Boolean);
+    reqs.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    setRequests(reqs);
+    await loadMembers();
     if (g) setSettings(await loadTeamSplitSettings(g));
     setSelected(new Set());
     if (g?.chainId) {
@@ -8051,7 +8063,7 @@ function TeamGroupEditor({ code }) {
       setPriorGroupOptions([]);
     }
     setLoading(false);
-  }, [code]);
+  }, [code, loadMembers]);
 
   useEffect(() => {
     load();
@@ -8207,6 +8219,91 @@ function TeamGroupEditor({ code }) {
       next.delete(studentId);
       return next;
     });
+  };
+
+  // Teacher-only display name override, mirroring course mode's GroupEditor exactly —
+  // stored on the group itself (never the member record or the student's account), so
+  // it's purely a local relabeling for this teacher's Students tab, always recoverable.
+  const [renamingMemberId, setRenamingMemberId] = useState(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const displayNameFor = (studentId, officialName) => group?.studentNameOverrides?.[studentId] || officialName;
+  const startRenameMember = (m) => {
+    setRenamingMemberId(m.id);
+    setRenameDraft(displayNameFor(m.id, m.name));
+  };
+  const cancelRenameMember = () => {
+    setRenamingMemberId(null);
+    setRenameDraft("");
+  };
+  const saveMemberOverrides = async (nextOverrides) => {
+    const updated = { ...group, studentNameOverrides: nextOverrides };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
+  };
+  const saveRenameMember = async (studentId) => {
+    const trimmed = renameDraft.trim();
+    const next = { ...(group.studentNameOverrides || {}) };
+    if (trimmed) next[studentId] = trimmed;
+    else delete next[studentId];
+    await saveMemberOverrides(next);
+    setRenamingMemberId(null);
+  };
+  const revertMemberName = async (studentId) => {
+    const next = { ...(group.studentNameOverrides || {}) };
+    delete next[studentId];
+    await saveMemberOverrides(next);
+    if (renamingMemberId === studentId) cancelRenameMember();
+  };
+
+  // ---- Attendance check ---- mirrors course mode's GroupEditor exactly, matched
+  // against accepted members instead of course-ranking responses.
+  const [attendanceOpen, setAttendanceOpen] = useState(false);
+  const [attendanceText, setAttendanceText] = useState("");
+  const [attendanceResult, setAttendanceResult] = useState(null); // { notInGroup: string[], notCalled: string[] }
+  const normalizeName = (s) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const checkAttendance = () => {
+    const typedNames = attendanceText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const rosterByName = {};
+    members.forEach((m) => {
+      const label = displayNameFor(m.id, m.name);
+      const key = normalizeName(label);
+      if (!rosterByName[key]) rosterByName[key] = [];
+      rosterByName[key].push(m.id);
+    });
+    const calledIds = new Set();
+    const notInGroup = [];
+    typedNames.forEach((raw) => {
+      const matches = rosterByName[normalizeName(raw)];
+      if (matches?.length) matches.forEach((id) => calledIds.add(id));
+      else notInGroup.push(raw);
+    });
+    const notCalled = members
+      .filter((m) => !calledIds.has(m.id))
+      .map((m) => displayNameFor(m.id, m.name))
+      .sort((a, b) => a.localeCompare(b));
+    setAttendanceResult({ notInGroup, notCalled });
+  };
+
+  // Team picks have no rank to sort by (unlike course choices) — "picks" here sorts
+  // whoever's still waiting on their groupmate picks to the top instead.
+  const sortMembers = (list) => {
+    const sorted = [...list];
+    switch (memberSort) {
+      case "picks":
+        sorted.sort((a, b) => {
+          const aw = pickedIds.has(a.id) ? 1 : 0;
+          const bw = pickedIds.has(b.id) ? 1 : 0;
+          return aw - bw || displayNameFor(a.id, a.name).localeCompare(displayNameFor(b.id, b.name));
+        });
+        break;
+      case "joined":
+        sorted.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+        break;
+      case "name":
+      default:
+        sorted.sort((a, b) => displayNameFor(a.id, a.name).localeCompare(displayNameFor(b.id, b.name)));
+    }
+    return sorted;
   };
 
   if (loading || !group) return <p style={{ color: inkSoft, fontSize: 13 }}>Loading…</p>;
@@ -8431,41 +8528,244 @@ function TeamGroupEditor({ code }) {
 
         {tab === "students" && (
           <div>
-            <p style={{ fontSize: 12.5, color: inkSoft, margin: "0 0 12px" }}>Students accepted into this team.</p>
-            {members.length === 0 ? (
-              <p style={{ color: inkSoft, fontSize: 13 }}>No students yet — accept requests from the Mailbox tab.</p>
-            ) : (
-              <div style={{ display: "grid", gap: 8 }}>
-                {members.map((m) => (
-                  <div
-                    key={m.id}
-                    style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10 }}>
+              <p style={{ fontSize: 12.5, color: inkSoft, margin: 0 }}>Students accepted into this team. This list refreshes from their responses.</p>
+              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                <IconBtn onClick={() => setAttendanceOpen((o) => !o)}>
+                  <CheckSquare size={13} /> Student check
+                </IconBtn>
+                <IconBtn onClick={loadMembers} tone="green">
+                  <RefreshCw size={13} /> {loadingMembers ? "Loading…" : "Refresh"}
+                </IconBtn>
+              </div>
+            </div>
+            {attendanceOpen && (
+              <div style={{ marginBottom: 14, background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: 14 }}>
+                <p style={{ fontSize: 12.5, color: inkSoft, margin: "0 0 8px" }}>
+                  Type or paste students' names, one per line — from a roster or attendance sheet. Case doesn't matter.
+                </p>
+                <textarea
+                  value={attendanceText}
+                  onChange={(e) => setAttendanceText(e.target.value)}
+                  placeholder={"Jane Doe\nJohn Smith\n…"}
+                  rows={6}
+                  style={{ width: "100%", fontFamily: mono, fontSize: 12.5, border: `1px solid ${line}`, borderRadius: 6, padding: 8, resize: "vertical", boxSizing: "border-box" }}
+                />
+                <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                  <Btn tone="green" onClick={checkAttendance} disabled={!attendanceText.trim()}>
+                    <CheckSquare size={14} /> Check students
+                  </Btn>
+                  <Btn
+                    tone="ghost"
+                    onClick={() => {
+                      setAttendanceOpen(false);
+                      setAttendanceText("");
+                      setAttendanceResult(null);
+                    }}
                   >
-                    <span style={{ fontWeight: 600, flex: 1 }}>{m.name}</span>
-                    {m.email && <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{m.email}</span>}
-                    {group.surveyOpen && (
-                      <span
-                        style={{
-                          fontSize: 10.5,
-                          fontWeight: 700,
-                          textTransform: "uppercase",
-                          letterSpacing: 0.5,
-                          padding: "2px 7px",
-                          borderRadius: 4,
-                          background: pickedIds.has(m.id) ? greenSoft : "#E4E9F1",
-                          color: pickedIds.has(m.id) ? green : inkSoft,
-                        }}
-                      >
-                        {pickedIds.has(m.id) ? "Picks in" : "Waiting"}
-                      </span>
-                    )}
-                    <IconBtn tone="clay" onClick={() => removeMember(m.id)} title="Remove from group">
-                      <X size={13} />
-                    </IconBtn>
+                    Close
+                  </Btn>
+                </div>
+                {attendanceResult && attendanceResult.notInGroup.length === 0 && attendanceResult.notCalled.length === 0 && (
+                  <div
+                    style={{
+                      marginTop: 14,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      background: greenSoft,
+                      color: green,
+                      borderRadius: 8,
+                      padding: "10px 14px",
+                      fontWeight: 700,
+                      fontSize: 13.5,
+                    }}
+                  >
+                    <Check size={16} /> All Students Checked
                   </div>
-                ))}
+                )}
+                {attendanceResult && (attendanceResult.notInGroup.length > 0 || attendanceResult.notCalled.length > 0) && (
+                  <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 11.5, fontWeight: 700, color: clay, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>
+                        Not in this group ({attendanceResult.notInGroup.length})
+                      </div>
+                      {attendanceResult.notInGroup.length === 0 ? (
+                        <p style={{ fontSize: 12.5, color: inkSoft, margin: 0 }}>Every typed name matched a student who responded.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {attendanceResult.notInGroup.map((name, i) => (
+                            <span key={i} style={{ background: claySoft, color: clay, borderRadius: 5, padding: "3px 8px", fontSize: 12.5 }}>
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11.5, fontWeight: 700, color: gold, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>
+                        In the group but not checked in ({attendanceResult.notCalled.length})
+                      </div>
+                      {attendanceResult.notCalled.length === 0 ? (
+                        <p style={{ fontSize: 12.5, color: inkSoft, margin: 0 }}>Every student who responded was on the list.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {attendanceResult.notCalled.map((name, i) => (
+                            <span key={i} style={{ background: goldSoft, color: gold, borderRadius: 5, padding: "3px 8px", fontSize: 12.5 }}>
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
+            {members.length > 0 && (
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                <div style={{ position: "relative", flex: 1 }}>
+                  <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: inkSoft }} />
+                  <input
+                    value={memberSearch}
+                    onChange={(e) => setMemberSearch(e.target.value)}
+                    placeholder="Search students by name or email…"
+                    style={{ ...inputStyle, paddingLeft: 30, fontSize: 13 }}
+                  />
+                </div>
+                <select value={memberSort} onChange={(e) => setMemberSort(e.target.value)} style={{ ...inputStyle, width: "auto", fontSize: 13 }}>
+                  <option value="name">Sort: Name (A–Z)</option>
+                  <option value="picks">Sort: Picks status</option>
+                  <option value="joined">Sort: Submission order</option>
+                </select>
+              </div>
+            )}
+            <div style={{ display: "grid", gap: 8 }}>
+              {sortMembers(
+                members.filter((m) => {
+                  const q = memberSearch.trim().toLowerCase();
+                  return !q || m.name.toLowerCase().includes(q) || displayNameFor(m.id, m.name).toLowerCase().includes(q) || m.email?.toLowerCase().includes(q);
+                })
+              ).map((m) => {
+                const expanded = expandedMember === m.id;
+                const picks = picksByStudentId[m.id]?.choices || [];
+                return (
+                  <div key={m.id} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5 }}>
+                    <div onClick={() => setExpandedMember(expanded ? null : m.id)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                      <ChevronRight size={13} style={{ color: inkSoft, flexShrink: 0, transition: "transform 0.15s", transform: expanded ? "rotate(90deg)" : "none" }} />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ fontWeight: 600 }}>{displayNameFor(m.id, m.name)}</span>
+                        {group.studentNameOverrides?.[m.id] && (
+                          <span
+                            title={`Renamed from: ${m.name}`}
+                            style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: inkSoft, background: "#E4E9F1", borderRadius: 4, padding: "1px 5px", verticalAlign: "middle" }}
+                          >
+                            renamed
+                          </span>
+                        )}
+                        {m.email && (
+                          <span style={{ display: "block", fontSize: 11.5, color: inkSoft, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {m.email}
+                          </span>
+                        )}
+                      </span>
+                      {group.surveyOpen && (
+                        <span
+                          style={{
+                            fontSize: 10.5,
+                            fontWeight: 700,
+                            textTransform: "uppercase",
+                            letterSpacing: 0.5,
+                            padding: "2px 7px",
+                            borderRadius: 4,
+                            background: pickedIds.has(m.id) ? greenSoft : "#E4E9F1",
+                            color: pickedIds.has(m.id) ? green : inkSoft,
+                          }}
+                        >
+                          {pickedIds.has(m.id) ? "Picks in" : "Waiting"}
+                        </span>
+                      )}
+                      <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>
+                        {picks.map((pid) => (members.find((mm) => mm.id === pid) ? displayNameFor(pid, members.find((mm) => mm.id === pid).name) : "—")).join("  ·  ")}
+                      </span>
+                      <IconBtn
+                        tone="clay"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeMember(m.id);
+                        }}
+                        title="Remove from group"
+                      >
+                        <X size={13} />
+                      </IconBtn>
+                    </div>
+                    {expanded && (
+                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${line}`, display: "grid", gap: 10 }} onClick={(e) => e.stopPropagation()}>
+                        <div style={{ fontSize: 12.5 }}>
+                          <strong>Display name:</strong>
+                          <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            {renamingMemberId === m.id ? (
+                              <>
+                                <input
+                                  autoFocus
+                                  value={renameDraft}
+                                  onChange={(e) => setRenameDraft(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") saveRenameMember(m.id);
+                                    if (e.key === "Escape") cancelRenameMember();
+                                  }}
+                                  style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "5px 8px", fontSize: 13, fontFamily: sans, width: 180 }}
+                                />
+                                <IconBtn tone="green" onClick={() => saveRenameMember(m.id)}>
+                                  <Check size={12} /> Save
+                                </IconBtn>
+                                <IconBtn onClick={cancelRenameMember}>
+                                  <X size={12} /> Cancel
+                                </IconBtn>
+                              </>
+                            ) : (
+                              <>
+                                <span>{displayNameFor(m.id, m.name)}</span>
+                                <IconBtn onClick={() => startRenameMember(m)} title="Only changes what you see — doesn't touch their account">
+                                  <Pencil size={12} /> Rename
+                                </IconBtn>
+                                {group.studentNameOverrides?.[m.id] && (
+                                  <IconBtn onClick={() => revertMemberName(m.id)} title={`Revert to official name: ${m.name}`}>
+                                    <RefreshCw size={12} /> Revert to original
+                                  </IconBtn>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 12.5 }}>
+                          <strong>Groupmate picks:</strong>
+                          {picksByStudentId[m.id] ? (
+                            <ol style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                              {picks.map((pid, i) => (
+                                <li key={i}>{(() => {
+                                  const mate = members.find((mm) => mm.id === pid);
+                                  return mate ? displayNameFor(mate.id, mate.name) : "(no longer in this group)";
+                                })()}</li>
+                              ))}
+                            </ol>
+                          ) : (
+                            <span style={{ color: inkSoft }}> Not submitted yet.</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {members.length === 0 && <p style={{ color: inkSoft, fontSize: 13 }}>No students yet — accept requests from the Mailbox tab.</p>}
+              {members.length > 0 &&
+                memberSearch.trim() &&
+                !members.some((m) => {
+                  const q = memberSearch.trim().toLowerCase();
+                  return m.name.toLowerCase().includes(q) || displayNameFor(m.id, m.name).toLowerCase().includes(q) || m.email?.toLowerCase().includes(q);
+                }) && <p style={{ color: inkSoft, fontSize: 13 }}>No students match "{memberSearch}".</p>}
+            </div>
           </div>
         )}
 
