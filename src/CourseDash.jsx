@@ -372,6 +372,11 @@ const DEFAULT_TEAM_SPLIT_SETTINGS = {
   splitMode: "even", // "even" | "custom"
   teamCount: 2,
   customSizes: [], // "custom" mode only: one entry per team, in order
+  // When on, Run Assignment replaces the default fairness pass (which spreads
+  // satisfaction evenly, minimizing deviation between students) with one that instead
+  // maximizes the total team success score — see teamSuccessScore. Team sizes are
+  // unaffected either way; only who ends up on which team changes.
+  maximizeSuccessScore: false,
 };
 function teamSplitSettingsKey(group) {
   return `team-split-settings:${group.code}`;
@@ -472,8 +477,14 @@ function meanAbsoluteDeviation(values) {
 // Neither step backtracks or guarantees a global optimum — it's a heuristic, not an
 // exact solver. `teamSizes` is a hard cap per team: if the sizes add up to fewer seats
 // than the member count, the leftover students come back in `unassigned` for the
-// teacher to place by hand, and never take part in the fairness-swap pass.
-function assignTeams(members, picksByStudentId, teamSizes, maxSwapPasses = 300) {
+// teacher to place by hand, and never take part in the swap pass.
+//
+// `maximizeSuccessScore` swaps out step 2's objective: instead of minimizing point
+// deviation (spreading satisfaction evenly across everyone), it maximizes the total
+// team success score (see teamSuccessScore) — concentrating satisfaction onto fewer,
+// fuller teams rather than smoothing it out. Team sizes are unaffected either way,
+// since both passes are strictly 1-for-1 swaps.
+function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300, maximizeSuccessScore = false } = {}) {
   const teams = teamSizes.map(() => []);
   const pickSets = {};
   members.forEach((m) => {
@@ -498,38 +509,42 @@ function assignTeams(members, picksByStudentId, teamSizes, maxSwapPasses = 300) 
     teams[best.i].push(student);
   });
 
-  // Fairness pass: best-improvement local search. Each round tries every pair of
-  // students on two different teams, swapping them (team sizes never change — it's a
-  // straight 1-for-1 swap) and checking whether that lowers the population-wide MAD
-  // without lowering the total points everyone has combined. Keeps the single
-  // best-improving swap it finds and repeats; stops as soon as a round finds no swap
-  // that helps.
-  const totalPoints = (pts) => Object.values(pts).reduce((a, b) => a + b, 0);
-  for (let pass = 0; pass < maxSwapPasses; pass++) {
-    const currentPoints = pointsByStudent(teams, pickSets);
-    const currentMad = meanAbsoluteDeviation(Object.values(currentPoints));
-    const currentTotal = totalPoints(currentPoints);
-    let bestSwap = null;
-    let bestMad = currentMad;
-    for (let ti = 0; ti < teams.length; ti++) {
-      for (let tj = ti + 1; tj < teams.length; tj++) {
-        for (let i = 0; i < teams[ti].length; i++) {
-          for (let j = 0; j < teams[tj].length; j++) {
-            const trial = teams.map((t) => t.slice());
-            [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
-            const trialPoints = pointsByStudent(trial, pickSets);
-            const mad = meanAbsoluteDeviation(Object.values(trialPoints));
-            if (mad < bestMad - 1e-9 && totalPoints(trialPoints) >= currentTotal - 1e-9) {
-              bestMad = mad;
-              bestSwap = { ti, i, tj, j };
+  if (maximizeSuccessScore) {
+    maximizeTeamSuccessScore(teams, pickSets, maxSwapPasses);
+  } else {
+    // Fairness pass: best-improvement local search. Each round tries every pair of
+    // students on two different teams, swapping them (team sizes never change — it's a
+    // straight 1-for-1 swap) and checking whether that lowers the population-wide MAD
+    // without lowering the total points everyone has combined. Keeps the single
+    // best-improving swap it finds and repeats; stops as soon as a round finds no swap
+    // that helps.
+    const totalPoints = (pts) => Object.values(pts).reduce((a, b) => a + b, 0);
+    for (let pass = 0; pass < maxSwapPasses; pass++) {
+      const currentPoints = pointsByStudent(teams, pickSets);
+      const currentMad = meanAbsoluteDeviation(Object.values(currentPoints));
+      const currentTotal = totalPoints(currentPoints);
+      let bestSwap = null;
+      let bestMad = currentMad;
+      for (let ti = 0; ti < teams.length; ti++) {
+        for (let tj = ti + 1; tj < teams.length; tj++) {
+          for (let i = 0; i < teams[ti].length; i++) {
+            for (let j = 0; j < teams[tj].length; j++) {
+              const trial = teams.map((t) => t.slice());
+              [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
+              const trialPoints = pointsByStudent(trial, pickSets);
+              const mad = meanAbsoluteDeviation(Object.values(trialPoints));
+              if (mad < bestMad - 1e-9 && totalPoints(trialPoints) >= currentTotal - 1e-9) {
+                bestMad = mad;
+                bestSwap = { ti, i, tj, j };
+              }
             }
           }
         }
       }
+      if (!bestSwap) break;
+      const { ti, i, tj, j } = bestSwap;
+      [teams[ti][i], teams[tj][j]] = [teams[tj][j], teams[ti][i]];
     }
-    if (!bestSwap) break;
-    const { ti, i, tj, j } = bestSwap;
-    [teams[ti][i], teams[tj][j]] = [teams[tj][j], teams[ti][i]];
   }
 
   return { teams, unassigned };
@@ -562,6 +577,109 @@ function computeTeamFairness(teams, picksByStudentId) {
   const pickSets = {};
   teams.forEach((team) => team.forEach((m) => (pickSets[m.id] = new Set(picksByStudentId[m.id]?.choices || []))));
   return meanAbsoluteDeviation(Object.values(pointsByStudent(teams, pickSets)));
+}
+
+// A team's success count `n`: how many of its members landed with at least one of the
+// groupmates they actually picked — a student who picked nobody, or whose entire pick
+// list missed, doesn't add to it.
+function teamSuccessCount(team, pickSets) {
+  const idsInTeam = new Set(team.map((m) => m.id));
+  return team.filter((m) => [...(pickSets[m.id] || [])].some((id) => idsInTeam.has(id))).length;
+}
+// A team's score: (1.1^n) * n. Each additional successful student is worth more than
+// the last, so this rewards concentrating success onto fewer, fuller teams over
+// spreading a little satisfaction thin across every team.
+function teamSuccessScore(team, pickSets) {
+  const n = teamSuccessCount(team, pickSets);
+  return Math.pow(1.1, n) * n;
+}
+function totalSuccessScore(teams, pickSets) {
+  return teams.reduce((sum, team) => sum + teamSuccessScore(team, pickSets), 0);
+}
+// Display-facing wrapper matching computeTeamFairness's shape: builds pickSets from the
+// raw picksByStudentId records so callers outside assignTeams don't have to.
+function computeTeamSuccessScore(teams, picksByStudentId) {
+  const pickSets = {};
+  teams.forEach((team) => team.forEach((m) => (pickSets[m.id] = new Set(picksByStudentId[m.id]?.choices || []))));
+  return totalSuccessScore(teams, pickSets);
+}
+
+// Alternative to the fairness pass: the same best-improvement local search over 1-for-1
+// swaps (team sizes never change), but aimed straight at maximizing totalSuccessScore
+// instead of evening out individual points. No leveling-down guardrail is needed here —
+// unlike minimizing MAD, which can cheat by dragging everyone down to equal, a swap is
+// only ever taken when it raises the very total being maximized, so there's no opposite
+// pathology to guard against.
+function maximizeTeamSuccessScore(teams, pickSets, maxSwapPasses = 300) {
+  for (let pass = 0; pass < maxSwapPasses; pass++) {
+    const currentScore = totalSuccessScore(teams, pickSets);
+    let bestSwap = null;
+    let bestScore = currentScore;
+    for (let ti = 0; ti < teams.length; ti++) {
+      for (let tj = ti + 1; tj < teams.length; tj++) {
+        for (let i = 0; i < teams[ti].length; i++) {
+          for (let j = 0; j < teams[tj].length; j++) {
+            const trial = teams.map((t) => t.slice());
+            [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
+            const score = totalSuccessScore(trial, pickSets);
+            if (score > bestScore + 1e-9) {
+              bestScore = score;
+              bestSwap = { ti, i, tj, j };
+            }
+          }
+        }
+      }
+    }
+    if (!bestSwap) break;
+    const { ti, i, tj, j } = bestSwap;
+    [teams[ti][i], teams[tj][j]] = [teams[tj][j], teams[ti][i]];
+  }
+  return teams;
+}
+
+// Pure move: relocates a student between teams (or Unassigned, index null) within a
+// teamResults object, mirroring moveStudentInResults for course mode. Marks them
+// `manual` so a hand override is visible in their "why" explanation. Returns the same
+// `teamResults` reference if the student wasn't found (no-op).
+function moveStudentInTeamResults(teamResults, studentId, fromTeamIndex, toTeamIndex) {
+  if (fromTeamIndex === toTeamIndex) return teamResults;
+  const teams = teamResults.teams.map((t) => t.slice());
+  let unassigned = [...teamResults.unassigned];
+  let studentObj = null;
+  const pull = (list) =>
+    list.filter((s) => {
+      if (s.id === studentId) {
+        studentObj = s;
+        return false;
+      }
+      return true;
+    });
+  if (fromTeamIndex == null) unassigned = pull(unassigned);
+  else teams[fromTeamIndex] = pull(teams[fromTeamIndex]);
+  if (!studentObj) return teamResults;
+  const moved = { ...studentObj, manual: true };
+  if (toTeamIndex == null) unassigned = [...unassigned, moved];
+  else teams[toTeamIndex] = [...teams[toTeamIndex], moved];
+  return { ...teamResults, teams, unassigned };
+}
+
+// Plain-language reasoning behind a single student's team placement, shown behind
+// their "why" button — mirrors explainPlacement's role for course mode, scaled down to
+// what team mode actually decides on: which of their picks landed, and who on the team
+// picked them back.
+function explainTeamPlacement({ student, teamIndex, teams, unassigned, picksByStudentId }) {
+  const nameById = {};
+  teams.forEach((team) => team.forEach((m) => (nameById[m.id] = m.name)));
+  unassigned.forEach((m) => (nameById[m.id] = m.name));
+  const pickedIds = picksByStudentId[student.id]?.choices || [];
+  const team = teamIndex != null ? teams[teamIndex] : null;
+  const teamIds = new Set((team || []).map((m) => m.id));
+  const picks = pickedIds.map((id) => ({ id, name: nameById[id] || "a former member", onTeam: teamIds.has(id) }));
+  const satisfiedCount = picks.filter((p) => p.onTeam).length;
+  const pickedByNames = team
+    ? team.filter((m) => m.id !== student.id && (picksByStudentId[m.id]?.choices || []).includes(student.id)).map((m) => m.name)
+    : [];
+  return { picks, satisfiedCount, pickedByNames };
 }
 
 // Scales each course's `target` proportionally so the capacities sum to exactly
@@ -7729,6 +7847,9 @@ function TeamGroupEditor({ code }) {
   const [message, setMessage] = useState("");
   const [copied, setCopied] = useState(false);
   const [running, setRunning] = useState(false);
+  const [dragStudent, setDragStudent] = useState(null); // { studentId, fromTeamIndex } — fromTeamIndex null = from Unassigned
+  const [dragOverId, setDragOverId] = useState(null); // team index, or "unassigned", currently hovered
+  const [explainFor, setExplainFor] = useState(null); // { student, teamIndex }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -7820,11 +7941,12 @@ function TeamGroupEditor({ code }) {
   const runAssignment = async () => {
     setRunning(true);
     const teamSizes = activeTeamSizes();
-    const { teams, unassigned } = assignTeams(members, picksByStudentId, teamSizes);
+    const { teams, unassigned } = assignTeams(members, picksByStudentId, teamSizes, { maximizeSuccessScore: settings.maximizeSuccessScore });
     const teamResults = {
       teams: teams.map((team) => team.map((m) => ({ id: m.id, name: m.name, email: m.email }))),
       unassigned: unassigned.map((m) => ({ id: m.id, name: m.name, email: m.email })),
       teamSizes,
+      maximizeSuccessScore: settings.maximizeSuccessScore,
       createdAt: Date.now(),
     };
     const updated = { ...group, teamResults };
@@ -7832,6 +7954,22 @@ function TeamGroupEditor({ code }) {
     await storeSet(`group:${code}`, updated, true);
     setRunning(false);
     setTab("results");
+  };
+
+  // Manual drag-to-reassign: move a student between teams (or to/from Unassigned)
+  // after an assignment has already run. Marks them `manual` so it's visible it was a
+  // hand override rather than a real placement from the algorithm.
+  const moveStudentBetweenTeams = async (toTeamIndex) => {
+    const drag = dragStudent;
+    setDragStudent(null);
+    setDragOverId(null);
+    if (!drag || !group.teamResults) return;
+    const { studentId, fromTeamIndex } = drag;
+    const nextResults = moveStudentInTeamResults(group.teamResults, studentId, fromTeamIndex, toTeamIndex);
+    if (nextResults === group.teamResults) return;
+    const updated = { ...group, teamResults: nextResults };
+    setGroup(updated);
+    await storeSet(`group:${code}`, updated, true);
   };
 
   const toggle = (id) =>
@@ -8017,6 +8155,31 @@ function TeamGroupEditor({ code }) {
         </div>
       </div>
 
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 8,
+          background: "#fff",
+          border: `1px solid ${line}`,
+          borderRadius: 9,
+          padding: "14px 14px",
+          marginBottom: 18,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Btn tone="green" onClick={runAssignment} disabled={running || members.length === 0}>
+            <Play size={15} /> {running ? "Running…" : group.teamResults ? "Re-run Assignment" : "Run Assignment"}
+          </Btn>
+        </div>
+        <p style={{ fontSize: 11, color: inkSoft, fontFamily: mono, margin: 0, textAlign: "center", maxWidth: 380 }}>
+          {settings.splitMode === "custom" ? "custom split" : "even split"} · {settings.teamCount} team{settings.teamCount === 1 ? "" : "s"} ·{" "}
+          {settings.maximizeSuccessScore ? "maximize success score" : "even fairness"} — edit in the Logic tab
+        </p>
+        {members.length === 0 && <p style={{ fontSize: 11.5, color: inkSoft, margin: 0 }}>Accept some students first.</p>}
+      </div>
+
       {message && (
         <div style={{ background: greenSoft, borderRadius: 8, padding: "9px 12px", marginBottom: 14, fontSize: 12.5, color: green, display: "flex", justifyContent: "space-between" }}>
           <span>{message}</span>
@@ -8125,10 +8288,24 @@ function TeamGroupEditor({ code }) {
         {tab === "logic" && (
           <div>
             <p style={{ fontSize: 12.5, color: inkSoft, marginTop: -4, marginBottom: 14 }}>
-              Choose how accepted students should be split into teams, then run the assignment from the Results tab.
+              Choose how accepted students should be split into teams, then run the assignment above.
             </p>
 
-            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <Toggle
+              label="Maximize Success score"
+              description={
+                <>
+                  On each team, count the members who landed with at least one groupmate they picked — call that n. A team's score
+                  is (1.1<sup>n</sup>) × n, rewarding concentrated success over spread-thin satisfaction. When on, Run Assignment
+                  maximizes the total score across all teams instead of evening out individual satisfaction; team sizes stay
+                  exactly as configured below either way.
+                </>
+              }
+              checked={settings.maximizeSuccessScore}
+              onChange={(v) => updateSplitSetting({ maximizeSuccessScore: v })}
+            />
+
+            <div style={{ display: "flex", gap: 8, marginTop: 14, marginBottom: 14 }}>
               {[
                 { key: "even", label: "Split evenly" },
                 { key: "custom", label: "Custom split" },
@@ -8222,74 +8399,166 @@ function TeamGroupEditor({ code }) {
         {tab === "results" && (
           <div>
             {!group.teamResults ? (
-              <div style={{ textAlign: "center", padding: "20px 0" }}>
-                <p style={{ color: inkSoft, fontSize: 13, marginBottom: 14 }}>No assignment has been run yet.</p>
-                <Btn onClick={runAssignment} disabled={running || members.length === 0}>
-                  <Play size={15} /> {running ? "Running…" : "Run Assignment"}
-                </Btn>
-                {members.length === 0 && <p style={{ fontSize: 11.5, color: inkSoft, marginTop: 10 }}>Accept some students first.</p>}
-              </div>
+              <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", padding: "20px 0" }}>No assignment has been run yet.</p>
             ) : (
               (() => {
-                const { teams, unassigned, createdAt } = group.teamResults;
+                const { teams, unassigned, createdAt, maximizeSuccessScore: ranMaximized } = group.teamResults;
                 const { totalPicks, satisfiedPicks } = computeTeamSatisfaction(teams, picksByStudentId);
                 const fairness = computeTeamFairness(teams, picksByStudentId);
+                const successScore = computeTeamSuccessScore(teams, picksByStudentId);
                 return (
                   <div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 10, flexWrap: "wrap" }}>
                       <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
                         Run {new Date(createdAt).toLocaleString()}.{" "}
                         {totalPicks > 0
                           ? `${satisfiedPicks} of ${totalPicks} groupmate picks landed on the same team (${Math.round(
                               (satisfiedPicks / totalPicks) * 100
-                            )}%). Fairness (lower = more even): ${fairness.toFixed(2)}.`
+                            )}%). ${ranMaximized ? "Maximized for" : "Optimized for"} ${ranMaximized ? "success score" : "fairness (lower = more even): " + fairness.toFixed(2)}.`
                           : "No picks were submitted at the time this ran."}
                       </p>
-                      <Btn tone="ghost" onClick={runAssignment} disabled={running || members.length === 0}>
-                        <RefreshCw size={14} /> {running ? "Running…" : "Re-run Assignment"}
-                      </Btn>
+                      <span
+                        title="Sum across teams of (1.1^n) × n, where n = members who landed with at least one of their picks"
+                        style={{ fontFamily: mono, fontSize: 12, fontWeight: 700, color: green, background: greenSoft, padding: "5px 10px", borderRadius: 6, whiteSpace: "nowrap" }}
+                      >
+                        Success score: {successScore.toFixed(2)}
+                      </span>
                     </div>
-                    <div style={{ display: "grid", gap: 12 }}>
-                      {teams.map((team, i) => (
-                        <div key={i} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, overflow: "hidden" }}>
-                          <div style={{ background: greenSoft, padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                            <span style={{ fontFamily: serif, fontSize: 15.5, fontWeight: 700, color: green }}>Team {i + 1}</span>
-                            <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{team.length} student{team.length === 1 ? "" : "s"}</span>
-                          </div>
-                          {team.length === 0 ? (
-                            <p style={{ padding: "10px 14px", fontSize: 12.5, color: inkSoft, margin: 0 }}>No students placed here.</p>
-                          ) : (
-                            <div style={{ display: "grid" }}>
-                              {team.map((m, j) => {
-                                const gotPicks = (picksByStudentId[m.id]?.choices || []).filter((cid) => team.some((tm) => tm.id === cid));
-                                return (
-                                  <div
-                                    key={m.id}
-                                    style={{ padding: "8px 14px", fontSize: 13, background: j % 2 ? "#fff" : "#F6F9FC", display: "flex", justifyContent: "space-between", gap: 10 }}
-                                  >
-                                    <span style={{ fontWeight: 600 }}>{m.name}</span>
-                                    <span style={{ fontSize: 11.5, color: inkSoft }}>
-                                      {picksByStudentId[m.id] ? `${gotPicks.length} of 3 picks here` : "no picks submitted"}
-                                    </span>
-                                  </div>
-                                );
-                              })}
+                    <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 14px", display: "flex", alignItems: "center", gap: 5 }}>
+                      <GripVertical size={13} /> Drag a student onto a different team (or onto Unassigned) to move them by hand.
+                    </p>
+                    <div style={{ display: "grid", gap: 16 }}>
+                      {teams.map((team, i) => {
+                        const isOver = dragOverId === i;
+                        return (
+                          <div
+                            key={i}
+                            onDragOver={(e) => {
+                              e.preventDefault();
+                              if (dragStudent) setDragOverId(i);
+                            }}
+                            onDragLeave={() => setDragOverId((id) => (id === i ? null : id))}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              moveStudentBetweenTeams(i);
+                            }}
+                            style={{
+                              border: `1px solid ${isOver ? gold : line}`,
+                              borderRadius: 8,
+                              overflow: "hidden",
+                              background: isOver ? goldSoft : "transparent",
+                              transition: "background .1s",
+                            }}
+                          >
+                            <div style={{ background: isOver ? "transparent" : greenSoft, padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                              <span style={{ fontFamily: serif, fontSize: 15.5, fontWeight: 700, color: green }}>Team {i + 1}</span>
+                              <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{team.length} student{team.length === 1 ? "" : "s"}</span>
                             </div>
+                            {team.length === 0 ? (
+                              <div style={{ padding: "10px 14px", fontSize: 12.5, color: inkSoft }}>No students placed here. Drop one here to add.</div>
+                            ) : (
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 12.5 }}>
+                                <tbody>
+                                  {team.map((m, j) => {
+                                    const totalForM = (picksByStudentId[m.id]?.choices || []).length;
+                                    const gotPicks = (picksByStudentId[m.id]?.choices || []).filter((cid) => team.some((tm) => tm.id === cid));
+                                    return (
+                                      <tr key={m.id} draggable onDragStart={() => setDragStudent({ studentId: m.id, fromTeamIndex: i })} onDragEnd={() => {
+                                        setDragStudent(null);
+                                        setDragOverId(null);
+                                      }} style={{ background: j % 2 ? "#fff" : "#F6F9FC", cursor: "grab" }}>
+                                        <td style={{ padding: "6px 14px", width: "50%" }}>
+                                          <GripVertical size={11} style={{ opacity: 0.4, marginRight: 4, verticalAlign: "-1px" }} />
+                                          {m.name}
+                                        </td>
+                                        <td style={{ padding: "6px 14px", textAlign: "right" }}>
+                                          <span
+                                            style={{
+                                              background: gotPicks.length > 0 ? greenSoft : "#E4E9F1",
+                                              color: gotPicks.length > 0 ? green : inkSoft,
+                                              borderRadius: 4,
+                                              padding: "2px 7px",
+                                              fontSize: 11,
+                                              fontWeight: 700,
+                                            }}
+                                          >
+                                            {picksByStudentId[m.id] ? `${gotPicks.length} of ${totalForM} picks here` : m.manual ? "not chosen" : "no picks submitted"}
+                                          </span>
+                                        </td>
+                                        <td style={{ padding: "6px 10px 6px 0", textAlign: "right" }}>
+                                          <button
+                                            onClick={() => setExplainFor({ student: m, teamIndex: i })}
+                                            title="Why did they end up here?"
+                                            style={{ background: "none", border: `1px solid ${line}`, borderRadius: 6, padding: "3px 5px", cursor: "pointer", color: inkSoft, display: "inline-flex" }}
+                                          >
+                                            <Info size={12} />
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {(unassigned.length > 0 || dragStudent) && (
+                        <div
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            if (dragStudent) setDragOverId("unassigned");
+                          }}
+                          onDragLeave={() => setDragOverId((id) => (id === "unassigned" ? null : id))}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            moveStudentBetweenTeams(null);
+                          }}
+                          style={{
+                            border: `1px solid ${dragOverId === "unassigned" ? gold : `${clay}55`}`,
+                            borderRadius: 8,
+                            overflow: "hidden",
+                            background: dragOverId === "unassigned" ? goldSoft : "transparent",
+                          }}
+                        >
+                          <div style={{ background: dragOverId === "unassigned" ? "transparent" : claySoft, padding: "8px 14px", display: "flex", alignItems: "center", gap: 6 }}>
+                            <AlertTriangle size={14} color={clay} />
+                            <span style={{ fontFamily: serif, fontSize: 16, fontWeight: 700, color: clay }}>Unassigned ({unassigned.length})</span>
+                          </div>
+                          {unassigned.length === 0 ? (
+                            <div style={{ padding: "10px 14px", fontSize: 12.5, color: inkSoft }}>Drop a student here to unassign them.</div>
+                          ) : (
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 12.5 }}>
+                              <tbody>
+                                {unassigned.map((m, j) => (
+                                  <tr key={m.id} draggable onDragStart={() => setDragStudent({ studentId: m.id, fromTeamIndex: null })} onDragEnd={() => {
+                                    setDragStudent(null);
+                                    setDragOverId(null);
+                                  }} style={{ background: j % 2 ? "#fff" : "#F6F9FC", cursor: "grab" }}>
+                                    <td style={{ padding: "6px 14px", width: "50%" }}>
+                                      <GripVertical size={11} style={{ opacity: 0.4, marginRight: 4, verticalAlign: "-1px" }} />
+                                      {m.name}
+                                    </td>
+                                    <td style={{ padding: "6px 14px", textAlign: "right", color: inkSoft }}>
+                                      {m.manual ? "manually unassigned" : "no room after the configured team sizes"}
+                                    </td>
+                                    <td style={{ padding: "6px 10px 6px 0", textAlign: "right" }}>
+                                      <button
+                                        onClick={() => setExplainFor({ student: m, teamIndex: null })}
+                                        title="Why did they end up unassigned?"
+                                        style={{ background: "none", border: `1px solid ${line}`, borderRadius: 6, padding: "3px 5px", cursor: "pointer", color: inkSoft, display: "inline-flex" }}
+                                      >
+                                        <Info size={12} />
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
                           )}
                         </div>
-                      ))}
+                      )}
                     </div>
-                    {unassigned.length > 0 && (
-                      <div style={{ marginTop: 12, background: claySoft, border: `1px solid ${clay}55`, borderRadius: 9, padding: "10px 14px" }}>
-                        <div style={{ fontWeight: 700, fontSize: 13, color: clay, marginBottom: 4 }}>
-                          Unassigned ({unassigned.length})
-                        </div>
-                        <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 6px" }}>
-                          The configured team sizes don't add up to enough seats for everyone — adjust them in the Logic tab and re-run.
-                        </p>
-                        <div style={{ fontSize: 13 }}>{unassigned.map((m) => m.name).join(", ")}</div>
-                      </div>
-                    )}
                   </div>
                 );
               })()
@@ -8297,6 +8566,68 @@ function TeamGroupEditor({ code }) {
           </div>
         )}
       </div>
+
+      {explainFor &&
+        group.teamResults &&
+        (() => {
+          const info = explainTeamPlacement({
+            student: explainFor.student,
+            teamIndex: explainFor.teamIndex,
+            teams: group.teamResults.teams,
+            unassigned: group.teamResults.unassigned,
+            picksByStudentId,
+          });
+          const s = explainFor.student;
+          return (
+            <div
+              onClick={() => setExplainFor(null)}
+              style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+            >
+              <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 380, maxWidth: "100%" }}>
+                <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: inkSoft, textTransform: "uppercase" }}>How this result happened</div>
+                <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 14px" }}>
+                  {s.name} → {explainFor.teamIndex != null ? `Team ${explainFor.teamIndex + 1}` : "Unassigned"}
+                </h3>
+                <div style={{ fontSize: 13, color: ink, lineHeight: 1.6, display: "grid", gap: 10 }}>
+                  <div>
+                    <strong>Their picks:</strong>{" "}
+                    {info.picks.length === 0
+                      ? "none submitted"
+                      : info.picks.map((p) => (p.onTeam ? `${p.name} ✓` : p.name)).join("  ·  ")}
+                  </div>
+                  {s.manual ? (
+                    <div style={{ background: greenSoft, borderRadius: 7, padding: "8px 10px" }}>
+                      A teacher manually {explainFor.teamIndex != null ? "moved them here" : "removed them from their team"}.
+                    </div>
+                  ) : explainFor.teamIndex == null ? (
+                    <div>The configured team sizes didn't add up to enough seats for everyone, so they were left unassigned.</div>
+                  ) : info.picks.length === 0 ? (
+                    <div>They submitted no groupmate picks, so the assignment placed them wherever best balanced the teams.</div>
+                  ) : info.satisfiedCount > 0 ? (
+                    <div>
+                      {info.satisfiedCount} of their {info.picks.length} pick{info.picks.length === 1 ? "" : "s"} landed on this team
+                      {group.teamResults.maximizeSuccessScore
+                        ? " — this run maximized total success score across all teams."
+                        : " — this run balanced satisfaction as evenly as possible across everyone."}
+                    </div>
+                  ) : (
+                    <div>None of their picks landed on this team — there wasn't room to place them with a pick without unbalancing another team.</div>
+                  )}
+                  {info.pickedByNames.length > 0 && (
+                    <div>
+                      <strong>Picked them back:</strong> {info.pickedByNames.join(", ")}
+                    </div>
+                  )}
+                </div>
+                <div style={{ marginTop: 16 }}>
+                  <Btn tone="ghost" onClick={() => setExplainFor(null)}>
+                    Close
+                  </Btn>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }
