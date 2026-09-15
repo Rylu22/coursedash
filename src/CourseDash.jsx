@@ -377,6 +377,12 @@ const DEFAULT_TEAM_SPLIT_SETTINGS = {
   // maximizes the total team success score — see teamSuccessScore. Team sizes are
   // unaffected either way; only who ends up on which team changes.
   maximizeSuccessScore: false,
+  // Carries priority forward from past rounds of the same series — see
+  // computeTeamHistoryWeight. Meaningless (and hidden in the Logic tab) unless this
+  // group is actually part of a team-mode series.
+  useHistory: false,
+  historyMode: "boost", // "boost" | "reunite" | "missed" | "smartWeight"
+  historyGroupCodes: null, // null = every prior group in the series; otherwise an explicit array of group codes to draw history from
 };
 function teamSplitSettingsKey(group) {
   return `team-split-settings:${group.code}`;
@@ -422,20 +428,30 @@ function shuffled(list) {
 // A student's "points" on their current team: 1 for each of their own picks who's a
 // teammate, plus 1 for each teammate who picked *them* — so a mutual pick is worth 2
 // between that pair, same "1 friend = +1 point" system used to seed the placement.
-function pointsFor(studentId, teamMembers, pickSets) {
+//
+// `historyWeights[studentId]` (from computeTeamHistoryWeight) optionally boosts the
+// FIRST half of that — the student's own pick landing — never the "being wanted" half,
+// since history priority is about this specific student finally getting what THEY
+// asked for, not about making them more wanted by others. `flat` applies to any of
+// their picks; `targeted` applies only to one specific remembered person.
+function pointsFor(studentId, teamMembers, pickSets, historyWeights = {}) {
+  const hw = historyWeights[studentId];
   return teamMembers.reduce((sum, other) => {
     if (other.id === studentId) return sum;
     let score = 0;
-    if (pickSets[studentId]?.has(other.id)) score += 1;
+    if (pickSets[studentId]?.has(other.id)) {
+      const bonus = hw ? (hw.flat || 0) + (hw.targeted?.[other.id] || 0) : 0;
+      score += 1 + bonus;
+    }
     if (pickSets[other.id]?.has(studentId)) score += 1;
     return sum + score;
   }, 0);
 }
-function pointsByStudent(teams, pickSets) {
+function pointsByStudent(teams, pickSets, historyWeights = {}) {
   const points = {};
   teams.forEach((team) => {
     team.forEach((m) => {
-      points[m.id] = pointsFor(m.id, team, pickSets);
+      points[m.id] = pointsFor(m.id, team, pickSets, historyWeights);
     });
   });
   return points;
@@ -484,7 +500,13 @@ function meanAbsoluteDeviation(values) {
 // team success score (see teamSuccessScore) — concentrating satisfaction onto fewer,
 // fuller teams rather than smoothing it out. Team sizes are unaffected either way,
 // since both passes are strictly 1-for-1 swaps.
-function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300, maximizeSuccessScore = false } = {}) {
+//
+// `historyWeights` (see computeTeamHistoryWeight) only ever shapes step 1's initial
+// placement — both step 2 passes are welcome to use it too, but only the fairness pass
+// actually does (via pointsFor); the maximize-score pass optimizes teamSuccessScore
+// directly and has no notion of per-student weight, so history's influence there is
+// limited to wherever the initial placement happened to seed people.
+function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300, maximizeSuccessScore = false, historyWeights = {} } = {}) {
   const teams = teamSizes.map(() => []);
   const pickSets = {};
   members.forEach((m) => {
@@ -500,7 +522,7 @@ function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300
     }
     let best = null;
     openTeamIndexes.forEach((i) => {
-      const score = pointsFor(student.id, teams[i], pickSets);
+      const score = pointsFor(student.id, teams[i], pickSets, historyWeights);
       const room = teamSizes[i] - teams[i].length;
       if (!best || score > best.score || (score === best.score && room > best.room)) {
         best = { i, score, room };
@@ -520,7 +542,7 @@ function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300
     // that helps.
     const totalPoints = (pts) => Object.values(pts).reduce((a, b) => a + b, 0);
     for (let pass = 0; pass < maxSwapPasses; pass++) {
-      const currentPoints = pointsByStudent(teams, pickSets);
+      const currentPoints = pointsByStudent(teams, pickSets, historyWeights);
       const currentMad = meanAbsoluteDeviation(Object.values(currentPoints));
       const currentTotal = totalPoints(currentPoints);
       let bestSwap = null;
@@ -531,7 +553,7 @@ function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300
             for (let j = 0; j < teams[tj].length; j++) {
               const trial = teams.map((t) => t.slice());
               [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
-              const trialPoints = pointsByStudent(trial, pickSets);
+              const trialPoints = pointsByStudent(trial, pickSets, historyWeights);
               const mad = meanAbsoluteDeviation(Object.values(trialPoints));
               if (mad < bestMad - 1e-9 && totalPoints(trialPoints) >= currentTotal - 1e-9) {
                 bestMad = mad;
@@ -680,6 +702,113 @@ function explainTeamPlacement({ student, teamIndex, teams, unassigned, picksBySt
     ? team.filter((m) => m.id !== student.id && (picksByStudentId[m.id]?.choices || []).includes(student.id)).map((m) => m.name)
     : [];
   return { picks, satisfiedCount, pickedByNames };
+}
+
+// Walks a team-mode chain's prior groups (most recent first) and builds, for each
+// current member, how much this round's assignment should favor their own picks —
+// consumed by pointsFor's `historyWeights` argument. Mirrors computeHistoryPriority for
+// course mode, adapted to team picks: there's no rank to lean on (everyone's picks count
+// equally), so "did this pick land or not" stands in for "which choice they got".
+//  - "boost": a flat streak of consecutive recent rounds where NONE of their picks
+//    landed, applied as a flat bonus to every pick they make this round.
+//  - "reunite": for each person they could plausibly pick again, how many consecutive
+//    recent rounds in a row they were actually teamed with that same person — applied
+//    only to that specific pick, to keep a good pairing going.
+//  - "missed": for each person they could plausibly pick again, how many consecutive
+//    recent rounds in a row they picked that person but did NOT land with them —
+//    applied only to that specific pick, to finally get them together.
+//  - "smartWeight": across every prior round with a run, adds 10 if none of their picks
+//    landed that round, 4 if exactly one did, 1 if exactly two did, 0 if all landed (or
+//    they made no picks) — summed, then applied as a flat bonus like "boost", but
+//    weighing a partial win less harshly than a total miss.
+async function computeTeamHistoryWeight(group, members, mode = "boost", allowedCodes = null) {
+  const weights = {};
+  if (!group.chainId) return weights;
+  const chain = await storeGet(`chain:${group.chainId}`, true);
+  if (!chain) return weights;
+  const idx = chain.groupCodes.indexOf(group.code);
+  if (idx <= 0) return weights;
+  let priorCodes = chain.groupCodes.slice(0, idx).reverse(); // most recent first
+  if (Array.isArray(allowedCodes)) {
+    const allowed = new Set(allowedCodes);
+    priorCodes = priorCodes.filter((c) => allowed.has(c));
+  }
+  const priorGroups = (await Promise.all(priorCodes.map((c) => storeGet(`group:${c}`, true).then(normalizeGroup)))).filter(Boolean);
+
+  const priorPicksByGroup = {};
+  for (const pg of priorGroups) {
+    const keys = await storeList(`team-picks:${pg.code}:`, true);
+    const recs = (await Promise.all(keys.map((k) => storeGet(k, true)))).filter(Boolean);
+    const byId = {};
+    recs.forEach((r) => (byId[r.id] = r));
+    priorPicksByGroup[pg.code] = byId;
+  }
+
+  // Who a student actually ended up teamed with that round — undefined if they weren't
+  // part of that round's run at all (no signal), an empty set if they were left
+  // unassigned (present, landed with nobody).
+  const teammatesOf = (pg, studentId) => {
+    if (!pg.teamResults) return undefined;
+    for (const team of pg.teamResults.teams) {
+      if (team.some((m) => m.id === studentId)) return new Set(team.filter((m) => m.id !== studentId).map((m) => m.id));
+    }
+    if (pg.teamResults.unassigned.some((m) => m.id === studentId)) return new Set();
+    return undefined;
+  };
+
+  if (mode === "reunite" || mode === "missed") {
+    for (const student of members) {
+      const candidateIds = new Set();
+      priorGroups.forEach((pg) => {
+        (priorPicksByGroup[pg.code]?.[student.id]?.choices || []).forEach((id) => candidateIds.add(id));
+        teammatesOf(pg, student.id)?.forEach((id) => candidateIds.add(id));
+      });
+      const targeted = {};
+      candidateIds.forEach((targetId) => {
+        let streak = 0;
+        for (const pg of priorGroups) {
+          const requested = priorPicksByGroup[pg.code]?.[student.id]?.choices || [];
+          const mates = teammatesOf(pg, student.id);
+          if (mode === "reunite") {
+            if (mates === undefined || !mates.has(targetId)) break;
+          } else {
+            if (!requested.includes(targetId) || mates === undefined || mates.has(targetId)) break;
+          }
+          streak++;
+        }
+        if (streak > 0) targeted[targetId] = streak;
+      });
+      if (Object.keys(targeted).length) weights[student.id] = { targeted };
+    }
+  } else if (mode === "smartWeight") {
+    for (const student of members) {
+      let total = 0;
+      for (const pg of priorGroups) {
+        const mates = teammatesOf(pg, student.id);
+        if (mates === undefined) continue;
+        const requested = priorPicksByGroup[pg.code]?.[student.id]?.choices || [];
+        if (requested.length === 0) continue;
+        const satisfied = requested.filter((id) => mates.has(id)).length;
+        total += satisfied === 0 ? 10 : satisfied === 1 ? 4 : satisfied === 2 ? 1 : 0;
+      }
+      if (total > 0) weights[student.id] = { flat: total };
+    }
+  } else {
+    // "boost": flat streak of consecutive rounds where none of their picks landed.
+    for (const student of members) {
+      let streak = 0;
+      for (const pg of priorGroups) {
+        const mates = teammatesOf(pg, student.id);
+        if (mates === undefined) break;
+        const requested = priorPicksByGroup[pg.code]?.[student.id]?.choices || [];
+        if (requested.length === 0) break;
+        if (requested.some((id) => mates.has(id))) break;
+        streak++;
+      }
+      if (streak > 0) weights[student.id] = { flat: streak };
+    }
+  }
+  return weights;
 }
 
 // Scales each course's `target` proportionally so the capacities sum to exactly
@@ -3043,6 +3172,11 @@ async function permanentlyDeleteGroup(group) {
     await storeSet(tgKey, tgList.filter((c) => c !== group.code), true);
   }
 
+  // Team split/history settings live per group code even inside a series (unlike
+  // course-mode's Logic settings, which move to a shared series-settings record instead)
+  // — see teamSplitSettingsKey — so this one always needs cleaning up, chained or not.
+  if (group.mode === "team") await storeDelete(`team-split-settings:${group.code}`, true);
+
   if (group.chainId) {
     const chain = await storeGet(`chain:${group.chainId}`, true);
     if (chain) {
@@ -3059,9 +3193,8 @@ async function permanentlyDeleteGroup(group) {
         await storeSet(`chain:${group.chainId}`, { ...chain, groupCodes: remainingCodes }, true);
       }
     }
-  } else {
+  } else if (group.mode !== "team") {
     await storeDelete(`group-settings:${group.code}`, true);
-    await storeDelete(`team-split-settings:${group.code}`, true);
   }
 
   await storeDelete(`group:${group.code}`, true);
@@ -5632,8 +5765,6 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
     onOpenGroup(code);
   };
 
-  // Team groups skip courses/logic/results entirely — no series support either, since
-  // "carry priority across years" doesn't mean anything without ranked choices.
   const createTeamGroup = async () => {
     if (!newName.trim()) return;
     setBusy(true);
@@ -5648,23 +5779,34 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
     onOpenTeamGroup(code);
   };
 
+  // Builds the right shape of "next year" group for a series — course-mode's full
+  // courses/results/publish fields, or team mode's much smaller shape — based on
+  // whether the chain (or, when starting a brand new one, the create form) is a team
+  // series. A chain's own `mode` decides which shape every group added to it gets, so
+  // a series can never end up mixing course groups and team groups.
+  const seriesGroupShape = (code, name, chainId, isTeam) =>
+    isTeam
+      ? { code, teacherEmail: user.email, name, mode: "team", chainId, status: "draft", createdAt: Date.now() }
+      : { code, teacherEmail: user.email, name, chainId, courses: [], results: null, status: "draft", publishedAt: null, resultsFinalized: false, createdAt: Date.now() };
+
   const createSeriesAndGroup = async () => {
     if (!seriesName.trim() || !yearLabel.trim()) return;
     setBusy(true);
     let code = genCode();
     while (await storeGet(`group:${code}`, true)) code = genCode();
     const chainId = genId();
-    const group = { code, teacherEmail: user.email, name: yearLabel.trim(), chainId, courses: [], results: null, status: "draft", publishedAt: null, resultsFinalized: false, createdAt: Date.now() };
+    const isTeam = groupKind === "team";
+    const group = seriesGroupShape(code, yearLabel.trim(), chainId, isTeam);
     await storeSet(`group:${code}`, group, true);
     await addGroupCode(code);
-    const chain = { id: chainId, teacherEmail: user.email, name: seriesName.trim(), groupCodes: [code] };
+    const chain = { id: chainId, teacherEmail: user.email, name: seriesName.trim(), groupCodes: [code], mode: isTeam ? "team" : "courses" };
     await storeSet(`chain:${chainId}`, chain, true);
     const chainIds = (await storeGet(`teacher-chains:${safeKey(user.email)}`, true)) || [];
     await storeSet(`teacher-chains:${safeKey(user.email)}`, [...chainIds, chainId], true);
     setBusy(false);
     resetCreate();
     load();
-    onOpenGroup(code);
+    (isTeam ? onOpenTeamGroup : onOpenGroup)(code);
   };
 
   const addToExistingSeries = async () => {
@@ -5675,9 +5817,10 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
       setBusy(false);
       return;
     }
+    const isTeam = (chain.mode || "courses") === "team";
     let code = genCode();
     while (await storeGet(`group:${code}`, true)) code = genCode();
-    const group = { code, teacherEmail: user.email, name: yearLabel.trim(), chainId: existingChainId, courses: [], results: null, status: "draft", publishedAt: null, resultsFinalized: false, createdAt: Date.now() };
+    const group = seriesGroupShape(code, yearLabel.trim(), existingChainId, isTeam);
     await storeSet(`group:${code}`, group, true);
     await addGroupCode(code);
     await storeSet(`chain:${existingChainId}`, { ...chain, groupCodes: [...chain.groupCodes, code] }, true);
@@ -5685,7 +5828,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
     resetCreate();
     setAddYearFor(null);
     load();
-    onOpenGroup(code);
+    (isTeam ? onOpenTeamGroup : onOpenGroup)(code);
   };
 
   const resetCreate = () => {
@@ -5741,6 +5884,10 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
     const target = allGroups[targetCode];
     if (!source || !target) return;
 
+    if ((source.mode || "courses") !== (target.mode || "courses")) {
+      setDropError("A course group and a team group can't share a series.");
+      return;
+    }
     if (source.chainId && target.chainId) {
       if (source.chainId !== target.chainId) {
         setDropError("Both groups already belong to different series — merging series isn't supported yet.");
@@ -5772,7 +5919,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
     const gB = allGroups[codeB];
     const chainId = genId();
     const ordered = [gA, gB].sort((a, b) => a.createdAt - b.createdAt).map((g) => g.code);
-    const chain = { id: chainId, teacherEmail: user.email, name: seriesNameForDrop.trim(), groupCodes: ordered };
+    const chain = { id: chainId, teacherEmail: user.email, name: seriesNameForDrop.trim(), groupCodes: ordered, mode: gA.mode === "team" ? "team" : "courses" };
     await storeSet(`chain:${chainId}`, chain, true);
     const chainIds = (await storeGet(`teacher-chains:${safeKey(user.email)}`, true)) || [];
     await storeSet(`teacher-chains:${safeKey(user.email)}`, [...chainIds, chainId], true);
@@ -5821,7 +5968,11 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
   const kindBtn = (kind, label) => (
     <button
       type="button"
-      onClick={() => setGroupKind(kind)}
+      onClick={() => {
+        setGroupKind(kind);
+        setCreateMode("standalone");
+        setExistingChainId("");
+      }}
       style={{
         flex: 1,
         padding: "8px 4px",
@@ -5866,7 +6017,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
       <Header
         eyebrow="Teacher dashboard"
         title="Your sorting groups"
-        sub="Link groups into a series to carry priority for students who missed their top choice in past years. Drag one group onto another to link them. Open a group and use its Logic tab to set assignment rules — shared by every group in the same series."
+        sub="Link groups into a series to carry priority from past rounds forward. Drag one group onto another to link them (a course group and a team group can't share a series). Open a group and use its Logic tab to set assignment rules."
       />
 
       {dropError && (
@@ -5889,14 +6040,17 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
                 Series · {chain.name}
               </div>
               <div style={{ display: "grid", gap: 8 }}>
-                {chain.groups.map((g, i) => (
+                {chain.groups.map((g, i) => {
+                  const isTeamGroup = g.mode === "team";
+                  const openThisChainGroup = () => (isTeamGroup ? onOpenTeamGroup : onOpenGroup)(g.code);
+                  return (
                   <div
                     key={g.code}
                     role="button"
                     tabIndex={0}
-                    onClick={() => onOpenGroup(g.code)}
-                    onKeyDown={(e) => e.key === "Enter" && onOpenGroup(g.code)}
-                    {...dragHandlers(g)}
+                    onClick={openThisChainGroup}
+                    onKeyDown={(e) => e.key === "Enter" && openThisChainGroup()}
+                    {...(isTeamGroup ? {} : dragHandlers(g))}
                     style={{
                       textAlign: "left",
                       background: dragOverCode === g.code ? goldSoft : "#fff",
@@ -5907,7 +6061,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
                       display: "flex",
                       justifyContent: "space-between",
                       alignItems: "center",
-                      cursor: "grab",
+                      cursor: isTeamGroup ? "pointer" : "grab",
                     }}
                   >
                     <div>
@@ -5915,19 +6069,22 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
                         {g.name} <span style={{ fontWeight: 400, color: inkSoft, fontSize: 14 }}>({g.studentCount})</span>
                       </div>
                       <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>
-                        {g.courses.length} courses · {g.studentCount} responses {i === chain.groups.length - 1 && "· most recent"}
+                        {isTeamGroup ? `${g.studentCount} accepted students` : `${g.courses.length} courses · ${g.studentCount} responses`}{" "}
+                        {i === chain.groups.length - 1 && "· most recent"}
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <IconBtn
-                        title="View responses grid (read-only)"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenGrid?.(g.code);
-                        }}
-                      >
-                        <LayoutGrid size={13} />
-                      </IconBtn>
+                      {!isTeamGroup && (
+                        <IconBtn
+                          title="View responses grid (read-only)"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenGrid?.(g.code);
+                          }}
+                        >
+                          <LayoutGrid size={13} />
+                        </IconBtn>
+                      )}
                       <IconBtn
                         title="Duplicate group"
                         onClick={(e) => {
@@ -5953,7 +6110,8 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               {addYearFor === chain.id ? (
                 <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 9, padding: 12, display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
@@ -6004,7 +6162,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
                       tabIndex={0}
                       onClick={openThisGroup}
                       onKeyDown={(e) => e.key === "Enter" && openThisGroup()}
-                      {...(isTeam ? {} : dragHandlers(g))}
+                      {...dragHandlers(g)}
                       style={{
                         textAlign: "left",
                         background: dragOverCode === g.code ? goldSoft : "#fff",
@@ -6014,7 +6172,7 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        cursor: isTeam ? "pointer" : "grab",
+                        cursor: "grab",
                       }}
                     >
                       <div>
@@ -6166,35 +6324,38 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
               {kindBtn("team", "Team Mode")}
             </div>
 
-            {groupKind === "courses" && (
-              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                {modeBtn("standalone", "Standalone")}
-                {modeBtn("new-series", "Start a series")}
-                {modeBtn("existing-series", "Add to a series")}
-              </div>
+            {groupKind === "team" && (
+              <p style={{ fontSize: 12, color: inkSoft, marginTop: -4, marginBottom: 10 }}>
+                Students request to join by code instead of ranking courses — you accept or decline each request from the group's Mailbox tab.
+              </p>
             )}
 
-            {groupKind === "courses" && createMode === "standalone" && (
+            <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+              {modeBtn("standalone", "Standalone")}
+              {modeBtn("new-series", "Start a series")}
+              {modeBtn("existing-series", "Add to a series")}
+            </div>
+
+            {createMode === "standalone" && (
               <Field label="Group name">
-                <input style={inputStyle} placeholder="e.g. 5th Period Courses" value={newName} onChange={(e) => setNewName(e.target.value)} />
+                <input
+                  style={inputStyle}
+                  placeholder={groupKind === "team" ? "e.g. Science Fair Teams" : "e.g. 5th Period Courses"}
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                />
               </Field>
             )}
 
-            {groupKind === "team" && (
-              <>
-                <p style={{ fontSize: 12, color: inkSoft, marginTop: -4, marginBottom: 10 }}>
-                  Students request to join by code instead of ranking courses — you accept or decline each request from the group's Mailbox tab.
-                </p>
-                <Field label="Group name">
-                  <input style={inputStyle} placeholder="e.g. Science Fair Teams" value={newName} onChange={(e) => setNewName(e.target.value)} />
-                </Field>
-              </>
-            )}
-
-            {groupKind === "courses" && createMode === "new-series" && (
+            {createMode === "new-series" && (
               <>
                 <Field label="Series name">
-                  <input style={inputStyle} placeholder="e.g. Chess Course Roster" value={seriesName} onChange={(e) => setSeriesName(e.target.value)} />
+                  <input
+                    style={inputStyle}
+                    placeholder={groupKind === "team" ? "e.g. Science Fair Teams" : "e.g. Chess Course Roster"}
+                    value={seriesName}
+                    onChange={(e) => setSeriesName(e.target.value)}
+                  />
                 </Field>
                 <Field label="This year's label">
                   <input style={inputStyle} placeholder="e.g. 2026-27" value={yearLabel} onChange={(e) => setYearLabel(e.target.value)} />
@@ -6202,12 +6363,12 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
               </>
             )}
 
-            {groupKind === "courses" && createMode === "existing-series" && (
+            {createMode === "existing-series" && (
               <>
                 <Field label="Series">
                   <select style={inputStyle} value={existingChainId} onChange={(e) => setExistingChainId(e.target.value)}>
                     <option value="">Select a series</option>
-                    {chains?.map((c) => (
+                    {chains?.filter((c) => (c.mode || "courses") === groupKind).map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -6223,20 +6384,19 @@ function TeacherDashboard({ user, onOpenGroup, onOpenGrid, onOpenTeamGroup }) {
             <div style={{ display: "flex", gap: 8 }}>
               <Btn
                 onClick={
-                  groupKind === "team"
-                    ? createTeamGroup
-                    : createMode === "standalone"
-                    ? createStandalone
+                  createMode === "standalone"
+                    ? groupKind === "team"
+                      ? createTeamGroup
+                      : createStandalone
                     : createMode === "new-series"
                     ? createSeriesAndGroup
                     : addToExistingSeries
                 }
                 disabled={
                   busy ||
-                  (groupKind === "team" && !newName.trim()) ||
-                  (groupKind === "courses" && createMode === "standalone" && !newName.trim()) ||
-                  (groupKind === "courses" && createMode === "new-series" && (!seriesName.trim() || !yearLabel.trim())) ||
-                  (groupKind === "courses" && createMode === "existing-series" && (!existingChainId || !yearLabel.trim()))
+                  (createMode === "standalone" && !newName.trim()) ||
+                  (createMode === "new-series" && (!seriesName.trim() || !yearLabel.trim())) ||
+                  (createMode === "existing-series" && (!existingChainId || !yearLabel.trim()))
                 }
               >
                 {busy ? "Creating…" : "Create"}
@@ -7850,6 +8010,8 @@ function TeamGroupEditor({ code }) {
   const [dragStudent, setDragStudent] = useState(null); // { studentId, fromTeamIndex } — fromTeamIndex null = from Unassigned
   const [dragOverId, setDragOverId] = useState(null); // team index, or "unassigned", currently hovered
   const [explainFor, setExplainFor] = useState(null); // { student, teamIndex }
+  const [chain, setChain] = useState(null);
+  const [priorGroupOptions, setPriorGroupOptions] = useState([]); // [{code, name}] for this series, most recent first
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -7873,6 +8035,21 @@ function TeamGroupEditor({ code }) {
     setPickedIds(new Set(picksList.map((p) => p.id)));
     if (g) setSettings(await loadTeamSplitSettings(g));
     setSelected(new Set());
+    if (g?.chainId) {
+      const chainRec = await storeGet(`chain:${g.chainId}`, true);
+      setChain(chainRec);
+      const idx = chainRec ? chainRec.groupCodes.indexOf(g.code) : -1;
+      if (idx > 0) {
+        const priorCodes = chainRec.groupCodes.slice(0, idx).reverse(); // most recent first
+        const priorGroups = await Promise.all(priorCodes.map((c) => storeGet(`group:${c}`, true)));
+        setPriorGroupOptions(priorCodes.map((c, i) => ({ code: c, name: priorGroups[i]?.name || c })));
+      } else {
+        setPriorGroupOptions([]);
+      }
+    } else {
+      setChain(null);
+      setPriorGroupOptions([]);
+    }
     setLoading(false);
   }, [code]);
 
@@ -7941,12 +8118,18 @@ function TeamGroupEditor({ code }) {
   const runAssignment = async () => {
     setRunning(true);
     const teamSizes = activeTeamSizes();
-    const { teams, unassigned } = assignTeams(members, picksByStudentId, teamSizes, { maximizeSuccessScore: settings.maximizeSuccessScore });
+    const historyWeights = settings.useHistory && group?.chainId ? await computeTeamHistoryWeight(group, members, settings.historyMode, settings.historyGroupCodes) : {};
+    const { teams, unassigned } = assignTeams(members, picksByStudentId, teamSizes, {
+      maximizeSuccessScore: settings.maximizeSuccessScore,
+      historyWeights,
+    });
     const teamResults = {
       teams: teams.map((team) => team.map((m) => ({ id: m.id, name: m.name, email: m.email }))),
       unassigned: unassigned.map((m) => ({ id: m.id, name: m.name, email: m.email })),
       teamSizes,
       maximizeSuccessScore: settings.maximizeSuccessScore,
+      historyMode: settings.useHistory ? settings.historyMode : null,
+      historyWeights,
       createdAt: Date.now(),
     };
     const updated = { ...group, teamResults };
@@ -8175,7 +8358,8 @@ function TeamGroupEditor({ code }) {
         </div>
         <p style={{ fontSize: 11, color: inkSoft, fontFamily: mono, margin: 0, textAlign: "center", maxWidth: 380 }}>
           {settings.splitMode === "custom" ? "custom split" : "even split"} · {settings.teamCount} team{settings.teamCount === 1 ? "" : "s"} ·{" "}
-          {settings.maximizeSuccessScore ? "maximize success score" : "even fairness"} — edit in the Logic tab
+          {settings.maximizeSuccessScore ? "maximize success score" : "even fairness"}
+          {chain ? ` · history ${settings.useHistory ? `on (${settings.historyMode})` : "off"}` : ""} — edit in the Logic tab
         </p>
         {members.length === 0 && <p style={{ fontSize: 11.5, color: inkSoft, margin: 0 }}>Accept some students first.</p>}
       </div>
@@ -8393,6 +8577,60 @@ function TeamGroupEditor({ code }) {
                 })()}
               </div>
             )}
+
+            <div style={{ paddingTop: 14, marginTop: 14, borderTop: `1px solid ${line}` }}>
+              <Toggle
+                label="Previous results priority"
+                description="In a series, past rounds give students priority this time."
+                checked={settings.useHistory}
+                onChange={(v) => updateSplitSetting({ useHistory: v })}
+                disabled={!chain}
+              />
+              {settings.useHistory && chain && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "0 0 12px 0" }}>
+                  {[
+                    { key: "boost", label: "Boost generally", desc: "A streak of rounds with zero satisfied picks in a row gives a flat bonus to all of their picks this round." },
+                    { key: "reunite", label: "Reunite with someone from before", desc: "If they pick the same person they were actually teamed with in a recent round, that specific pick gets a bonus." },
+                    { key: "missed", label: "A teammate they missed before", desc: "If they pick the same person they wanted but didn't land with in a recent round, that specific pick gets a bonus." },
+                    {
+                      key: "smartWeight",
+                      label: "Smart Weight Analysis",
+                      desc: "Adds up how unsuccessful each past round was (0 picks landed = 10, 1 landed = 4, 2 landed = 1) across the series — highest total gets the biggest bonus this round.",
+                    },
+                  ].map((opt) => (
+                    <button
+                      key={opt.key}
+                      onClick={() => updateSplitSetting({ historyMode: opt.key })}
+                      style={{
+                        textAlign: "left",
+                        padding: "8px 10px",
+                        borderRadius: 7,
+                        border: `1px solid ${settings.historyMode === opt.key ? green : line}`,
+                        background: settings.historyMode === opt.key ? greenSoft : "#fff",
+                        cursor: "pointer",
+                        fontFamily: sans,
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, fontSize: 12.5, color: settings.historyMode === opt.key ? green : ink, display: "flex", alignItems: "center", gap: 5 }}>
+                        {opt.key === "smartWeight" && <Sparkles size={12} />}
+                        {opt.label}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: inkSoft, marginTop: 1 }}>{opt.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {settings.useHistory && chain && priorGroupOptions.length > 0 && (
+                <HistorySourcePicker
+                  options={priorGroupOptions}
+                  selected={settings.historyGroupCodes}
+                  onChange={(codes) => updateSplitSetting({ historyGroupCodes: codes })}
+                />
+              )}
+              {settings.useHistory && !chain && (
+                <p style={{ fontSize: 12, color: inkSoft, marginTop: -4, marginBottom: 12 }}>This toggle has no effect until the group is part of a series.</p>
+              )}
+            </div>
           </div>
         )}
 
@@ -8616,6 +8854,17 @@ function TeamGroupEditor({ code }) {
                   {info.pickedByNames.length > 0 && (
                     <div>
                       <strong>Picked them back:</strong> {info.pickedByNames.join(", ")}
+                    </div>
+                  )}
+                  {group.teamResults.historyMode && group.teamResults.historyWeights?.[s.id] && (
+                    <div style={{ background: goldSoft, borderRadius: 7, padding: "8px 10px", color: gold }}>
+                      History priority ({group.teamResults.historyMode}) gave extra weight to {group.teamResults.historyWeights[s.id].targeted
+                        ? `their pick${Object.keys(group.teamResults.historyWeights[s.id].targeted).length === 1 ? "" : "s"} for ${info.picks
+                            .filter((p) => group.teamResults.historyWeights[s.id].targeted[p.id])
+                            .map((p) => p.name)
+                            .join(", ") || "a past teammate"}`
+                        : "all of their picks"}{" "}
+                      this round.
                     </div>
                   )}
                 </div>
