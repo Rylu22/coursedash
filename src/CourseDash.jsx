@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
-  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown,
+  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown, Network,
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient.js";
 
@@ -8069,6 +8069,222 @@ function GroupEditor({ code, onOpenGrid }) {
   );
 }
 
+// ---------------- TEAM CONNECTIONS WEB ----------------
+// A real green for the Connections Web's team highlight — the palette's `green` is
+// actually the app's blue, and the highlight needs to read as distinct from the blue
+// two-way arrows.
+const webGreen = "#1E9E5A";
+const webGreenSoft = "#E0F5E9";
+const WEB_BOX_W = 124;
+const WEB_BOX_H = 44;
+
+// Read-only board of who picked whom in a team group. Every accepted member is a box
+// arranged around a circle — sorted by assigned team so teammates sit next to each
+// other — with an arrow toward each person they picked. A mutual pick is drawn once,
+// as a blue line with heads at both ends. Clicking a student highlights their whole
+// assigned team in green and fades every arrow that doesn't touch them; clicking them
+// again (or empty board) clears it.
+function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor }) {
+  const [selectedId, setSelectedId] = useState(null);
+  const scrollRef = React.useRef(null);
+
+  // id -> team index, "unassigned", or undefined (joined after the last run / no run yet)
+  const teamOf = useMemo(() => {
+    const map = {};
+    teamResults?.teams.forEach((team, i) => team.forEach((m) => (map[m.id] = i)));
+    teamResults?.unassigned.forEach((m) => (map[m.id] = "unassigned"));
+    return map;
+  }, [teamResults]);
+  const teamLabel = (id) => {
+    const t = teamOf[id];
+    if (typeof t === "number") return `Team ${t + 1}`;
+    if (t === "unassigned") return "Unassigned";
+    return teamResults ? "Not in last run" : "No team yet";
+  };
+
+  const ordered = useMemo(() => {
+    const rank = (id) => (typeof teamOf[id] === "number" ? teamOf[id] : teamOf[id] === "unassigned" ? 1e6 : 1e6 + 1);
+    return members.slice().sort((a, b) => rank(a.id) - rank(b.id) || displayNameFor(a.id, a.name).localeCompare(displayNameFor(b.id, b.name)));
+  }, [members, teamOf, displayNameFor]);
+
+  // Circle big enough that neighbors at the top and bottom (where they sit side by side)
+  // don't overlap: the arc between two neighbors has to fit a box plus a gap.
+  const n = ordered.length;
+  const radius = Math.max(170, (n * (WEB_BOX_W + 18)) / (2 * Math.PI));
+  const margin = 40;
+  const size = 2 * radius + WEB_BOX_W + 2 * margin;
+  const center = size / 2;
+  const pos = useMemo(() => {
+    const p = {};
+    ordered.forEach((m, i) => {
+      const angle = (2 * Math.PI * i) / Math.max(1, n) - Math.PI / 2;
+      p[m.id] = { x: center + radius * Math.cos(angle), y: center + radius * Math.sin(angle) };
+    });
+    return p;
+  }, [ordered, n, center, radius]);
+
+  // Picks of removed students (or of someone who's left) are skipped — only arrows
+  // between two current members are drawn. Mutual pairs collapse into one edge.
+  const edges = useMemo(() => {
+    const ids = new Set(members.map((m) => m.id));
+    const picks = (id) => (picksByStudentId[id]?.choices || []).filter((c) => c !== id && ids.has(c));
+    const out = [];
+    members.forEach((m) => {
+      picks(m.id).forEach((to) => {
+        const mutual = picks(to).includes(m.id);
+        if (mutual && m.id > to) return; // drawn from the other side
+        out.push({ from: m.id, to, mutual });
+      });
+    });
+    return out;
+  }, [members, picksByStudentId]);
+
+  // Keep the board centered when it first appears, since it's usually wider than the view.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2;
+    el.scrollTop = (el.scrollHeight - el.clientHeight) / 2;
+  }, [size]);
+
+  if (members.length === 0) return <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", padding: "20px 0" }}>Accept some students to see their connections.</p>;
+
+  const selectedTeam = selectedId != null ? teamOf[selectedId] : undefined;
+  const highlighted = (id) =>
+    selectedId != null && (id === selectedId || (typeof selectedTeam === "number" && teamOf[id] === selectedTeam));
+
+  // Trims a center-to-center line back to the edges of both boxes, leaving a small gap
+  // so arrowheads land just outside the box instead of underneath it.
+  const clipToBox = (a, b) => {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    const edge = Math.min(WEB_BOX_W / 2 / (Math.abs(ux) || 1e-9), WEB_BOX_H / 2 / (Math.abs(uy) || 1e-9)) + 3;
+    return { x1: a.x + ux * edge, y1: a.y + uy * edge, x2: b.x - ux * edge, y2: b.y - uy * edge };
+  };
+
+  const mutualCount = edges.filter((e) => e.mutual).length;
+  const oneWayCount = edges.length - mutualCount;
+  const arrowColor = (e) => (e.mutual ? green : "#8C9AB0");
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
+          Each arrow points from a student to someone they picked. Click a student to highlight their team.
+        </p>
+        <div style={{ display: "flex", gap: 14, fontSize: 11.5, fontFamily: mono, color: inkSoft }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <svg width="26" height="8">
+              <line x1="1" y1="4" x2="20" y2="4" stroke="#8C9AB0" strokeWidth="1.5" />
+              <path d="M19,0 L26,4 L19,8 z" fill="#8C9AB0" />
+            </svg>
+            one-way ({oneWayCount})
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <svg width="30" height="8">
+              <path d="M7,0 L0,4 L7,8 z" fill={green} />
+              <line x1="6" y1="4" x2="24" y2="4" stroke={green} strokeWidth="1.5" />
+              <path d="M23,0 L30,4 L23,8 z" fill={green} />
+            </svg>
+            two-way ({mutualCount})
+          </span>
+        </div>
+      </div>
+      <div
+        ref={scrollRef}
+        style={{ overflow: "auto", maxHeight: 640, border: `1px solid ${line}`, borderRadius: 9, background: "#fff" }}
+      >
+        <div
+          onClick={() => setSelectedId(null)}
+          style={{
+            position: "relative",
+            width: size,
+            height: size,
+            backgroundImage: `radial-gradient(${line} 1px, transparent 1px)`,
+            backgroundSize: "18px 18px",
+          }}
+        >
+          <svg width={size} height={size} style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+            <defs>
+              {[
+                { id: "web-arrow-one", color: "#8C9AB0" },
+                { id: "web-arrow-two", color: green },
+              ].map((m) => (
+                <marker key={m.id} id={m.id} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" fill={m.color} />
+                </marker>
+              ))}
+            </defs>
+            {edges.map((e) => {
+              const { x1, y1, x2, y2 } = clipToBox(pos[e.from], pos[e.to]);
+              const touches = selectedId == null || e.from === selectedId || e.to === selectedId;
+              const marker = `url(#${e.mutual ? "web-arrow-two" : "web-arrow-one"})`;
+              return (
+                <line
+                  key={`${e.from}-${e.to}`}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={arrowColor(e)}
+                  strokeWidth={selectedId != null && touches ? 2.2 : 1.4}
+                  opacity={touches ? 0.9 : 0.12}
+                  markerEnd={marker}
+                  markerStart={e.mutual ? marker : undefined}
+                />
+              );
+            })}
+          </svg>
+          {ordered.map((m) => {
+            const on = highlighted(m.id);
+            const isSelected = m.id === selectedId;
+            const p = pos[m.id];
+            return (
+              <button
+                key={m.id}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  setSelectedId((cur) => (cur === m.id ? null : m.id));
+                }}
+                title={`${displayNameFor(m.id, m.name)} · ${teamLabel(m.id)}`}
+                style={{
+                  position: "absolute",
+                  left: p.x - WEB_BOX_W / 2,
+                  top: p.y - WEB_BOX_H / 2,
+                  width: WEB_BOX_W,
+                  height: WEB_BOX_H,
+                  boxSizing: "border-box",
+                  background: on ? webGreenSoft : "#fff",
+                  border: `${isSelected ? 2 : 1}px solid ${on ? webGreen : line}`,
+                  borderRadius: 8,
+                  boxShadow: "0 1px 3px rgba(19,34,56,0.08)",
+                  cursor: "pointer",
+                  padding: "4px 8px",
+                  fontFamily: sans,
+                  textAlign: "center",
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "center",
+                  gap: 2,
+                  transition: "background .12s, border-color .12s",
+                }}
+              >
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {displayNameFor(m.id, m.name)}
+                </span>
+                <span style={{ fontSize: 10.5, fontFamily: mono, fontWeight: 700, color: on ? webGreen : inkSoft, whiteSpace: "nowrap" }}>{teamLabel(m.id)}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------- TEAM GROUP EDITOR ----------------
 // A team-mode group is a different shape of group entirely from a normal course-ranking
 // group: no courses, no preference logic, no assignment run. Students request to join by
@@ -8610,6 +8826,7 @@ function TeamGroupEditor({ code }) {
         <FolderTab active={tab === "students"} onClick={() => setTab("students")} icon={Users} label={`Students (${members.length})`} />
         <FolderTab active={tab === "logic"} onClick={() => setTab("logic")} icon={Sliders} label="Logic" />
         <FolderTab active={tab === "results"} onClick={() => setTab("results")} icon={ListOrdered} label="Results" />
+        <FolderTab active={tab === "connections"} onClick={() => setTab("connections")} icon={Network} label="Connections" />
       </div>
 
       <div style={{ background: paper, border: `1px solid ${line}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: 22 }}>
@@ -9179,6 +9396,10 @@ function TeamGroupEditor({ code }) {
               )}
             </div>
           </div>
+        )}
+
+        {tab === "connections" && (
+          <ConnectionsWeb members={members} picksByStudentId={picksByStudentId} teamResults={group.teamResults} displayNameFor={displayNameFor} />
         )}
 
         {tab === "results" && (
