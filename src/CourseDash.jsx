@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
-  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2,
+  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown,
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient.js";
 
@@ -383,13 +383,39 @@ const DEFAULT_TEAM_SPLIT_SETTINGS = {
   useHistory: false,
   historyMode: "boost", // "boost" | "reunite" | "missed" | "smartWeight"
   historyGroupCodes: null, // null = every prior group in the series; otherwise an explicit array of group codes to draw history from
+  // "Specific preferences": sets of students the teacher wants kept apart — no two
+  // students from the same set should land on the same team. Stored as member ids, so
+  // a set that loses members (someone removed from the group) just shrinks; a set with
+  // fewer than 2 current members does nothing.
+  useSpecificPrefs: false,
+  avoidGroups: [], // [{ id, studentIds: [...] }]
+  // Which factor wins when they pull in different directions — see assignTeams. Only
+  // factors that are actually turned on take part; the rest are skipped in place.
+  priorityOrder: ["specificPrefs", "history", "successScore"],
 };
+const TEAM_PRIORITY_FACTORS = ["specificPrefs", "history", "successScore"];
+const TEAM_PRIORITY_LABELS = { specificPrefs: "Specific preferences", history: "Previous results priority", successScore: "Success score" };
+// Repairs a stored priority order: drops unknown entries and duplicates, and appends any
+// factor that's missing (e.g. one added after the order was saved) at the end.
+function normalizeTeamPriorityOrder(order) {
+  const seen = new Set();
+  const out = [];
+  (order || []).forEach((f) => {
+    if (TEAM_PRIORITY_FACTORS.includes(f) && !seen.has(f)) {
+      seen.add(f);
+      out.push(f);
+    }
+  });
+  TEAM_PRIORITY_FACTORS.forEach((f) => !seen.has(f) && out.push(f));
+  return out;
+}
 function teamSplitSettingsKey(group) {
   return `team-split-settings:${group.code}`;
 }
 async function loadTeamSplitSettings(group) {
   const s = await storeGet(teamSplitSettingsKey(group), true);
-  return { ...DEFAULT_TEAM_SPLIT_SETTINGS, ...(s || {}) };
+  const merged = { ...DEFAULT_TEAM_SPLIT_SETTINGS, ...(s || {}) };
+  return { ...merged, priorityOrder: normalizeTeamPriorityOrder(merged.priorityOrder) };
 }
 async function saveTeamSplitSettings(group, next) {
   await storeSet(teamSplitSettingsKey(group), next, true);
@@ -499,19 +525,41 @@ function meanAbsoluteDeviation(values) {
 // deviation (spreading satisfaction evenly across everyone), it maximizes the total
 // team success score (see teamSuccessScore) — concentrating satisfaction onto fewer,
 // fuller teams rather than smoothing it out. Team sizes are unaffected either way,
-// since both passes are strictly 1-for-1 swaps.
+// since every swap is strictly 1-for-1.
 //
-// `historyWeights` (see computeTeamHistoryWeight) only ever shapes step 1's initial
-// placement — both step 2 passes are welcome to use it too, but only the fairness pass
-// actually does (via pointsFor); the maximize-score pass optimizes teamSuccessScore
-// directly and has no notion of per-student weight, so history's influence there is
-// limited to wherever the initial placement happened to seed people.
-function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300, maximizeSuccessScore = false, historyWeights = {} } = {}) {
+// `priorityOrder` is the teacher's custom ranking of the factors that are turned on —
+// any of "specificPrefs" (fewest keep-apart pairs sharing a team, from
+// `avoidPartners`), "history" (most history bonus actually landing, see
+// historyBonusTotal) and "successScore" (highest totalSuccessScore). Step 2 compares
+// placements factor by factor in that order, like sorting by several columns: a swap
+// that improves an earlier factor always wins, even if it costs a later one, and a later
+// factor only gets a say between placements that tie on everything before it. When
+// success score is off, the fairness objective above sits underneath all of them as the
+// last word. Step 1 leans the same way: a student avoids a team holding someone they're
+// meant to be kept apart from to whatever degree specific preferences outranks picks.
+//
+// `historyWeights` (see computeTeamHistoryWeight) also feeds pointsFor, so it shapes the
+// initial placement and the fairness objective even when history isn't in the order.
+function assignTeams(
+  members,
+  picksByStudentId,
+  teamSizes,
+  { maxSwapPasses = 300, maximizeSuccessScore = false, historyWeights = {}, avoidPartners = {}, priorityOrder = [] } = {}
+) {
   const teams = teamSizes.map(() => []);
   const pickSets = {};
   members.forEach((m) => {
     pickSets[m.id] = new Set(picksByStudentId[m.id]?.choices || []);
   });
+
+  // Step 1's per-team preference key, highest first: the ranked factors (specific
+  // preferences as "fewer conflicts", history/success both as pick points), then plain
+  // pick points, then most room left.
+  const placementKey = (studentId, team, room) => {
+    const pts = pointsFor(studentId, team, pickSets, historyWeights);
+    const conflicts = team.filter((m) => avoidPartners[studentId]?.has(m.id)).length;
+    return [...priorityOrder.map((f) => (f === "specificPrefs" ? -conflicts : pts)), pts, room];
+  };
 
   const unassigned = [];
   shuffled(members).forEach((student) => {
@@ -522,54 +570,122 @@ function assignTeams(members, picksByStudentId, teamSizes, { maxSwapPasses = 300
     }
     let best = null;
     openTeamIndexes.forEach((i) => {
-      const score = pointsFor(student.id, teams[i], pickSets, historyWeights);
-      const room = teamSizes[i] - teams[i].length;
-      if (!best || score > best.score || (score === best.score && room > best.room)) {
-        best = { i, score, room };
-      }
+      const key = placementKey(student.id, teams[i], teamSizes[i] - teams[i].length);
+      if (!best || compareScoreKeys(key, best.key) > 0) best = { i, key };
     });
     teams[best.i].push(student);
   });
 
-  if (maximizeSuccessScore) {
-    maximizeTeamSuccessScore(teams, pickSets, maxSwapPasses);
-  } else {
-    // Fairness pass: best-improvement local search. Each round tries every pair of
-    // students on two different teams, swapping them (team sizes never change — it's a
-    // straight 1-for-1 swap) and checking whether that lowers the population-wide MAD
-    // without lowering the total points everyone has combined. Keeps the single
-    // best-improving swap it finds and repeats; stops as soon as a round finds no swap
-    // that helps.
-    const totalPoints = (pts) => Object.values(pts).reduce((a, b) => a + b, 0);
-    for (let pass = 0; pass < maxSwapPasses; pass++) {
-      const currentPoints = pointsByStudent(teams, pickSets, historyWeights);
-      const currentMad = meanAbsoluteDeviation(Object.values(currentPoints));
-      const currentTotal = totalPoints(currentPoints);
-      let bestSwap = null;
-      let bestMad = currentMad;
-      for (let ti = 0; ti < teams.length; ti++) {
-        for (let tj = ti + 1; tj < teams.length; tj++) {
-          for (let i = 0; i < teams[ti].length; i++) {
-            for (let j = 0; j < teams[tj].length; j++) {
-              const trial = teams.map((t) => t.slice());
-              [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
-              const trialPoints = pointsByStudent(trial, pickSets, historyWeights);
-              const mad = meanAbsoluteDeviation(Object.values(trialPoints));
-              if (mad < bestMad - 1e-9 && totalPoints(trialPoints) >= currentTotal - 1e-9) {
-                bestMad = mad;
-                bestSwap = { ti, i, tj, j };
-              }
+  // Step 2: best-improvement local search. Each round tries every pair of students on
+  // two different teams, swapping them (team sizes never change — it's a straight
+  // 1-for-1 swap) and keeps the single best swap it finds by the rules above; stops as
+  // soon as a round finds no swap that helps. Every accepted swap strictly improves the
+  // ranked key (or, at an equal key, strictly lowers MAD), so this always terminates.
+  const factorScore = (f, ts) =>
+    f === "specificPrefs" ? -avoidConflictCount(ts, avoidPartners) : f === "history" ? historyBonusTotal(ts, pickSets, historyWeights) : totalSuccessScore(ts, pickSets);
+  const rankedKey = (ts) => priorityOrder.map((f) => factorScore(f, ts));
+  const useFairness = !maximizeSuccessScore;
+  const totalPoints = (pts) => Object.values(pts).reduce((a, b) => a + b, 0);
+  for (let pass = 0; pass < maxSwapPasses; pass++) {
+    const currentKey = rankedKey(teams);
+    const currentPoints = useFairness ? pointsByStudent(teams, pickSets, historyWeights) : null;
+    const currentTotal = useFairness ? totalPoints(currentPoints) : 0;
+    let bestSwap = null;
+    let bestKey = currentKey;
+    let bestMad = useFairness ? meanAbsoluteDeviation(Object.values(currentPoints)) : 0;
+    for (let ti = 0; ti < teams.length; ti++) {
+      for (let tj = ti + 1; tj < teams.length; tj++) {
+        for (let i = 0; i < teams[ti].length; i++) {
+          for (let j = 0; j < teams[tj].length; j++) {
+            const trial = teams.map((t) => t.slice());
+            [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
+            const key = rankedKey(trial);
+            const cmp = compareScoreKeys(key, bestKey);
+            if (cmp < 0) continue;
+            if (cmp > 0) {
+              bestKey = key;
+              bestMad = useFairness ? meanAbsoluteDeviation(Object.values(pointsByStudent(trial, pickSets, historyWeights))) : 0;
+              bestSwap = { ti, i, tj, j };
+              continue;
+            }
+            if (!useFairness) continue;
+            // Tied on every ranked factor: fall through to the fairness objective. A
+            // swap only counts as more even if it doesn't lower everyone's total points
+            // — pure MAD minimization would happily level a well-matched pair down to
+            // zero each just because "everyone equally unsatisfied" scores as more even.
+            const trialPoints = pointsByStudent(trial, pickSets, historyWeights);
+            const mad = meanAbsoluteDeviation(Object.values(trialPoints));
+            if (mad < bestMad - 1e-9 && totalPoints(trialPoints) >= currentTotal - 1e-9) {
+              bestMad = mad;
+              bestSwap = { ti, i, tj, j };
             }
           }
         }
       }
-      if (!bestSwap) break;
-      const { ti, i, tj, j } = bestSwap;
-      [teams[ti][i], teams[tj][j]] = [teams[tj][j], teams[ti][i]];
     }
+    if (!bestSwap) break;
+    const { ti, i, tj, j } = bestSwap;
+    [teams[ti][i], teams[tj][j]] = [teams[tj][j], teams[ti][i]];
   }
 
   return { teams, unassigned };
+}
+
+// Lexicographic comparison of two equal-length score arrays, higher-is-better at every
+// position: 1 if `a` is better, -1 if worse, 0 if tied (within floating-point noise).
+function compareScoreKeys(a, b) {
+  for (let k = 0; k < a.length; k++) {
+    if (a[k] > b[k] + 1e-9) return 1;
+    if (a[k] < b[k] - 1e-9) return -1;
+  }
+  return 0;
+}
+
+// Turns the teacher's keep-apart sets into, for each student, the set of everyone
+// they're meant to be kept apart from. Ids not in `memberIds` (removed students) are
+// dropped, so a set left with fewer than 2 current members contributes nothing.
+function buildAvoidPartners(avoidGroups, memberIds) {
+  const partners = {};
+  (avoidGroups || []).forEach((g) => {
+    const ids = [...new Set(g.studentIds || [])].filter((id) => memberIds.has(id));
+    ids.forEach((a) =>
+      ids.forEach((b) => {
+        if (a === b) return;
+        if (!partners[a]) partners[a] = new Set();
+        partners[a].add(b);
+      })
+    );
+  });
+  return partners;
+}
+// How many keep-apart pairs ended up sharing a team (each pair counted once).
+function avoidConflictCount(teams, avoidPartners) {
+  let count = 0;
+  teams.forEach((team) => {
+    for (let a = 0; a < team.length; a++) {
+      for (let b = a + 1; b < team.length; b++) {
+        if (avoidPartners[team[a].id]?.has(team[b].id)) count++;
+      }
+    }
+  });
+  return count;
+}
+// How much of the history bonus (see computeTeamHistoryWeight) actually landed: for
+// every student with a weight, the extra (beyond the plain 1 point) earned by each of
+// their picks who's a teammate. Higher = the students history meant to favor got more of
+// what they asked for.
+function historyBonusTotal(teams, pickSets, historyWeights) {
+  let total = 0;
+  teams.forEach((team) => {
+    team.forEach((m) => {
+      const hw = historyWeights[m.id];
+      if (!hw) return;
+      team.forEach((other) => {
+        if (other.id !== m.id && pickSets[m.id]?.has(other.id)) total += (hw.flat || 0) + (hw.targeted?.[other.id] || 0);
+      });
+    });
+  });
+  return total;
 }
 
 // How many of everyone's 3 picks actually landed them on the same team as that pick,
@@ -624,39 +740,6 @@ function computeTeamSuccessScore(teams, picksByStudentId) {
   const pickSets = {};
   teams.forEach((team) => team.forEach((m) => (pickSets[m.id] = new Set(picksByStudentId[m.id]?.choices || []))));
   return totalSuccessScore(teams, pickSets);
-}
-
-// Alternative to the fairness pass: the same best-improvement local search over 1-for-1
-// swaps (team sizes never change), but aimed straight at maximizing totalSuccessScore
-// instead of evening out individual points. No leveling-down guardrail is needed here —
-// unlike minimizing MAD, which can cheat by dragging everyone down to equal, a swap is
-// only ever taken when it raises the very total being maximized, so there's no opposite
-// pathology to guard against.
-function maximizeTeamSuccessScore(teams, pickSets, maxSwapPasses = 300) {
-  for (let pass = 0; pass < maxSwapPasses; pass++) {
-    const currentScore = totalSuccessScore(teams, pickSets);
-    let bestSwap = null;
-    let bestScore = currentScore;
-    for (let ti = 0; ti < teams.length; ti++) {
-      for (let tj = ti + 1; tj < teams.length; tj++) {
-        for (let i = 0; i < teams[ti].length; i++) {
-          for (let j = 0; j < teams[tj].length; j++) {
-            const trial = teams.map((t) => t.slice());
-            [trial[ti][i], trial[tj][j]] = [trial[tj][j], trial[ti][i]];
-            const score = totalSuccessScore(trial, pickSets);
-            if (score > bestScore + 1e-9) {
-              bestScore = score;
-              bestSwap = { ti, i, tj, j };
-            }
-          }
-        }
-      }
-    }
-    if (!bestSwap) break;
-    const { ti, i, tj, j } = bestSwap;
-    [teams[ti][i], teams[tj][j]] = [teams[tj][j], teams[ti][i]];
-  }
-  return teams;
 }
 
 // Pure move: relocates a student between teams (or Unassigned, index null) within a
@@ -8127,13 +8210,50 @@ function TeamGroupEditor({ code }) {
   // current member count, "custom" is whatever the teacher typed in the Logic tab.
   const activeTeamSizes = () => (settings.splitMode === "custom" ? settings.customSizes : evenSplitSizes(members.length, settings.teamCount));
 
+  // Keep-apart sets that will actually do something this run: specific preferences on,
+  // and at least 2 of the set's students still accepted members.
+  const activeAvoidGroups = () => {
+    if (!settings.useSpecificPrefs) return [];
+    const memberIds = new Set(members.map((m) => m.id));
+    return settings.avoidGroups
+      .map((g) => ({ id: g.id, studentIds: g.studentIds.filter((id) => memberIds.has(id)) }))
+      .filter((g) => g.studentIds.length >= 2);
+  };
+  // Whether each ranked factor is switched on and able to matter right now. History is
+  // only "on" with a series behind it; the run passes `hasHistoryWeights` once it knows
+  // whether any student actually earned a bonus.
+  const factorIsOn = (f, hasHistoryWeights = true) =>
+    f === "specificPrefs" ? activeAvoidGroups().length > 0 : f === "history" ? settings.useHistory && !!chain && hasHistoryWeights : settings.maximizeSuccessScore;
+  const activePriorityOrder = (hasHistoryWeights = true) => settings.priorityOrder.filter((f) => factorIsOn(f, hasHistoryWeights));
+  const movePriority = (index, delta) => {
+    const next = settings.priorityOrder.slice();
+    const target = index + delta;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    updateSplitSetting({ priorityOrder: next });
+  };
+
+  // Specific preferences editing — each set is edited in place by id, so two sets
+  // being edited back to back never clobber each other.
+  const updateAvoidGroups = (fn) => updateSplitSetting({ avoidGroups: fn(settings.avoidGroups) });
+  const addAvoidGroup = () => updateAvoidGroups((gs) => [...gs, { id: `avoid-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, studentIds: [] }]);
+  const removeAvoidGroup = (id) => updateAvoidGroups((gs) => gs.filter((g) => g.id !== id));
+  const addToAvoidGroup = (id, studentId) =>
+    updateAvoidGroups((gs) => gs.map((g) => (g.id === id && !g.studentIds.includes(studentId) ? { ...g, studentIds: [...g.studentIds, studentId] } : g)));
+  const removeFromAvoidGroup = (id, studentId) => updateAvoidGroups((gs) => gs.map((g) => (g.id === id ? { ...g, studentIds: g.studentIds.filter((s) => s !== studentId) } : g)));
+
   const runAssignment = async () => {
     setRunning(true);
     const teamSizes = activeTeamSizes();
     const historyWeights = settings.useHistory && group?.chainId ? await computeTeamHistoryWeight(group, members, settings.historyMode, settings.historyGroupCodes) : {};
+    const avoidGroups = activeAvoidGroups();
+    const avoidPartners = buildAvoidPartners(avoidGroups, new Set(members.map((m) => m.id)));
+    const priorityOrder = activePriorityOrder(Object.keys(historyWeights).length > 0);
     const { teams, unassigned } = assignTeams(members, picksByStudentId, teamSizes, {
       maximizeSuccessScore: settings.maximizeSuccessScore,
       historyWeights,
+      avoidPartners,
+      priorityOrder,
     });
     const teamResults = {
       teams: teams.map((team) => team.map((m) => ({ id: m.id, name: m.name, email: m.email }))),
@@ -8142,6 +8262,8 @@ function TeamGroupEditor({ code }) {
       maximizeSuccessScore: settings.maximizeSuccessScore,
       historyMode: settings.useHistory ? settings.historyMode : null,
       historyWeights,
+      avoidGroups,
+      priorityOrder,
       createdAt: Date.now(),
     };
     const updated = { ...group, teamResults };
@@ -8456,7 +8578,10 @@ function TeamGroupEditor({ code }) {
         <p style={{ fontSize: 11, color: inkSoft, fontFamily: mono, margin: 0, textAlign: "center", maxWidth: 380 }}>
           {settings.splitMode === "custom" ? "custom split" : "even split"} · {settings.teamCount} team{settings.teamCount === 1 ? "" : "s"} ·{" "}
           {settings.maximizeSuccessScore ? "maximize success score" : "even fairness"}
-          {chain ? ` · history ${settings.useHistory ? `on (${settings.historyMode})` : "off"}` : ""} — edit in the Logic tab
+          {chain ? ` · history ${settings.useHistory ? `on (${settings.historyMode})` : "off"}` : ""}
+          {activeAvoidGroups().length > 0 ? ` · ${activeAvoidGroups().length} keep-apart set${activeAvoidGroups().length === 1 ? "" : "s"}` : ""}
+          {activePriorityOrder().length > 1 ? ` · priority: ${activePriorityOrder().map((f) => TEAM_PRIORITY_LABELS[f].toLowerCase()).join(" > ")}` : ""} — edit in
+          the Logic tab
         </p>
         {members.length === 0 && <p style={{ fontSize: 11.5, color: inkSoft, margin: 0 }}>Accept some students first.</p>}
       </div>
@@ -8931,6 +9056,128 @@ function TeamGroupEditor({ code }) {
                 <p style={{ fontSize: 12, color: inkSoft, marginTop: -4, marginBottom: 12 }}>This toggle has no effect until the group is part of a series.</p>
               )}
             </div>
+
+            <div style={{ paddingTop: 14, marginTop: 14, borderTop: `1px solid ${line}` }}>
+              <Toggle
+                label="Specific preferences"
+                description="Pick students who shouldn't be put on the same team. Within each set, no two students will share a team if it can be avoided."
+                checked={settings.useSpecificPrefs}
+                onChange={(v) => updateSplitSetting({ useSpecificPrefs: v })}
+              />
+              {settings.useSpecificPrefs && (
+                <div style={{ display: "grid", gap: 8, padding: "10px 0 12px" }}>
+                  {settings.avoidGroups.length === 0 && <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>No sets yet — add one to choose students to keep apart.</p>}
+                  {settings.avoidGroups.map((g, gi) => {
+                    const inSet = g.studentIds.map((id) => members.find((m) => m.id === id)).filter(Boolean);
+                    const addable = members.filter((m) => !g.studentIds.includes(m.id));
+                    return (
+                      <div key={g.id} style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 8, padding: "9px 11px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.5 }}>Keep apart · set {gi + 1}</span>
+                          <button
+                            onClick={() => removeAvoidGroup(g.id)}
+                            title="Delete this set"
+                            style={{ background: "none", border: "none", color: clay, cursor: "pointer", display: "inline-flex", padding: 0 }}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                          {inSet.map((m) => (
+                            <span
+                              key={m.id}
+                              style={{ display: "inline-flex", alignItems: "center", gap: 4, background: claySoft, color: clay, borderRadius: 5, padding: "3px 6px 3px 8px", fontSize: 12, fontWeight: 600 }}
+                            >
+                              {displayNameFor(m.id, m.name)}
+                              <button
+                                onClick={() => removeFromAvoidGroup(g.id, m.id)}
+                                title="Remove from this set"
+                                style={{ background: "none", border: "none", color: clay, cursor: "pointer", display: "inline-flex", padding: 0 }}
+                              >
+                                <X size={12} />
+                              </button>
+                            </span>
+                          ))}
+                          {addable.length > 0 && (
+                            <select
+                              value=""
+                              onChange={(e) => e.target.value && addToAvoidGroup(g.id, e.target.value)}
+                              style={{ border: `1px dashed ${line}`, borderRadius: 5, padding: "3px 6px", fontSize: 12, fontFamily: sans, background: "#fff", color: inkSoft }}
+                            >
+                              <option value="">+ Add student…</option>
+                              {addable.map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {displayNameFor(m.id, m.name)}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                        {inSet.length < 2 && <p style={{ fontSize: 11.5, color: gold, margin: "7px 0 0" }}>Add at least 2 students for this set to have any effect.</p>}
+                      </div>
+                    );
+                  })}
+                  <div>
+                    <IconBtn onClick={addAvoidGroup} tone="green" disabled={members.length < 2} title={members.length < 2 ? "Accept at least 2 students first" : undefined}>
+                      <Plus size={13} /> Add a set
+                    </IconBtn>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ paddingTop: 14, marginTop: 14, borderTop: `1px solid ${line}` }}>
+              <div style={{ fontWeight: 700, fontSize: 13.5, fontFamily: sans }}>Priority order</div>
+              <div style={{ fontSize: 12, color: inkSoft, marginTop: 2, marginBottom: 10 }}>
+                When these pull in different directions, the one on top wins — a lower one only decides between placements that tie on everything above
+                it. Factors that are turned off are skipped.
+              </div>
+              <div style={{ display: "grid", gap: 6 }}>
+                {settings.priorityOrder.map((f, i) => {
+                  const on = factorIsOn(f);
+                  const arrowStyle = (disabled) => ({
+                    background: "none",
+                    border: `1px solid ${line}`,
+                    borderRadius: 5,
+                    padding: 2,
+                    display: "inline-flex",
+                    cursor: disabled ? "not-allowed" : "pointer",
+                    color: inkSoft,
+                    opacity: disabled ? 0.35 : 1,
+                  });
+                  return (
+                    <div
+                      key={f}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        background: "#fff",
+                        border: `1px solid ${on ? green : line}`,
+                        borderRadius: 7,
+                        padding: "7px 10px",
+                        opacity: on ? 1 : 0.6,
+                      }}
+                    >
+                      <span style={{ fontFamily: mono, fontSize: 12, fontWeight: 700, color: on ? green : inkSoft, width: 16 }}>{i + 1}</span>
+                      <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: on ? ink : inkSoft }}>{TEAM_PRIORITY_LABELS[f]}</span>
+                      <span style={{ fontSize: 11, fontFamily: mono, color: on ? green : inkSoft }}>{on ? "on" : "off"}</span>
+                      <button onClick={() => movePriority(i, -1)} disabled={i === 0} title="Move up" style={arrowStyle(i === 0)}>
+                        <ChevronUp size={14} />
+                      </button>
+                      <button onClick={() => movePriority(i, 1)} disabled={i === settings.priorityOrder.length - 1} title="Move down" style={arrowStyle(i === settings.priorityOrder.length - 1)}>
+                        <ChevronDown size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {!settings.maximizeSuccessScore && (
+                <p style={{ fontSize: 11.5, color: inkSoft, margin: "8px 0 0" }}>
+                  With success score off, any ties left over go to whichever placement spreads satisfaction most evenly.
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -8944,6 +9191,11 @@ function TeamGroupEditor({ code }) {
                 const { totalPicks, satisfiedPicks } = computeTeamSatisfaction(teams, picksByStudentId);
                 const fairness = computeTeamFairness(teams, picksByStudentId);
                 const successScore = computeTeamSuccessScore(teams, picksByStudentId);
+                // Recomputed from the current teams, not stored, so a hand drag that puts
+                // two kept-apart students together shows up here right away.
+                const runAvoidGroups = group.teamResults.avoidGroups || [];
+                const runAvoidPartners = buildAvoidPartners(runAvoidGroups, new Set([...teams.flat(), ...unassigned].map((m) => m.id)));
+                const keepApartConflicts = avoidConflictCount(teams, runAvoidPartners);
                 return (
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 10, flexWrap: "wrap" }}>
@@ -8962,6 +9214,23 @@ function TeamGroupEditor({ code }) {
                         Success score: {successScore.toFixed(2)}
                       </span>
                     </div>
+                    {runAvoidGroups.length > 0 && (
+                      <p
+                        style={{
+                          fontSize: 12,
+                          margin: "0 0 6px",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 5,
+                          color: keepApartConflicts > 0 ? clay : green,
+                        }}
+                      >
+                        {keepApartConflicts > 0 ? <AlertTriangle size={13} /> : <Check size={13} />}
+                        {keepApartConflicts > 0
+                          ? `${keepApartConflicts} keep-apart pair${keepApartConflicts === 1 ? " is" : "s are"} on the same team — check the "why" on the flagged students.`
+                          : `Every specific preference was honored — no kept-apart students share a team.`}
+                      </p>
+                    )}
                     <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 14px", display: "flex", alignItems: "center", gap: 5 }}>
                       <GripVertical size={13} /> Drag a student onto a different team (or onto Unassigned) to move them by hand.
                     </p>
@@ -9008,6 +9277,11 @@ function TeamGroupEditor({ code }) {
                                         <td style={{ padding: "6px 14px", width: "50%" }}>
                                           <GripVertical size={11} style={{ opacity: 0.4, marginRight: 4, verticalAlign: "-1px" }} />
                                           {m.name}
+                                          {team.some((tm) => runAvoidPartners[m.id]?.has(tm.id)) && (
+                                            <span title="On the same team as someone they're meant to be kept apart from" style={{ marginLeft: 5, color: clay }}>
+                                              <AlertTriangle size={11} style={{ verticalAlign: "-1px" }} />
+                                            </span>
+                                          )}
                                         </td>
                                         <td style={{ padding: "6px 14px", textAlign: "right" }}>
                                           <span
@@ -9156,6 +9430,28 @@ function TeamGroupEditor({ code }) {
                       <strong>Picked them back:</strong> {info.pickedByNames.join(", ")}
                     </div>
                   )}
+                  {(() => {
+                    // Everyone this student was meant to be kept apart from, per the
+                    // sets snapshotted when this run happened.
+                    const all = [...group.teamResults.teams.flat(), ...group.teamResults.unassigned];
+                    const partners = buildAvoidPartners(group.teamResults.avoidGroups || [], new Set(all.map((m) => m.id)))[s.id];
+                    if (!partners) return null;
+                    const team = explainFor.teamIndex != null ? group.teamResults.teams[explainFor.teamIndex] : [];
+                    const together = team.filter((m) => partners.has(m.id));
+                    const apart = all.filter((m) => partners.has(m.id) && !together.includes(m)).map((m) => m.name);
+                    return together.length > 0 ? (
+                      <div style={{ background: claySoft, borderRadius: 7, padding: "8px 10px", color: clay }}>
+                        Specific preferences asked to keep them apart from {together.map((m) => m.name).join(", ")}, but they're on the same team
+                        {s.manual || together.some((m) => m.manual)
+                          ? " because of a manual move."
+                          : " — no swap could separate them without breaking a higher-priority factor or the team sizes."}
+                      </div>
+                    ) : (
+                      <div style={{ background: greenSoft, borderRadius: 7, padding: "8px 10px", color: green }}>
+                        Kept apart from {apart.join(", ")} (specific preferences).
+                      </div>
+                    );
+                  })()}
                   {group.teamResults.historyMode && group.teamResults.historyWeights?.[s.id] && (
                     <div style={{ background: goldSoft, borderRadius: 7, padding: "8px 10px", color: gold }}>
                       History priority ({group.teamResults.historyMode}) gave extra weight to {group.teamResults.historyWeights[s.id].targeted
