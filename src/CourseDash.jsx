@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
-  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown, Network, Minus, Trophy, Star, LayoutList,
+  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown, Network, Minus, Trophy, Star, LayoutList, Target,
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient.js";
 
@@ -8475,6 +8475,7 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
     return counts;
   }, [members, picksByStudentId]);
   const [showRanking, setShowRanking] = useState(false);
+  const [ringCenter, setRingCenter] = useState(null); // student id the relations ring popup is centered on
 
   const visibleEdges = edges.filter(
     (e) => (showAll || e.success) && (!twoWayOnly || e.mutual) && (viewIds.size === 0 || viewIds.has(e.from) || viewIds.has(e.to))
@@ -8645,7 +8646,14 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
       </div>
       {viewIds.size > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10, fontSize: 12 }}>
-          <span style={{ color: inkSoft, fontWeight: 700 }}>Popularity:</span>
+          {viewIds.size === 1 ? (
+            <WebPill active={false} onClick={() => setRingCenter([...viewIds][0])} title="See everyone arranged by how closely they connect to this student">
+              <Target size={12} /> View relations ring
+            </WebPill>
+          ) : (
+            <span style={{ color: inkSoft, fontSize: 11.5 }}>Select just one student to view their relations ring.</span>
+          )}
+          <span style={{ color: inkSoft, fontWeight: 700, marginLeft: 4 }}>Popularity:</span>
           {viewIds.size <= 12 ? (
             ordered
               .filter((m) => viewIds.has(m.id))
@@ -8813,6 +8821,17 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
         </div>
         </div>
       </div>
+      {ringCenter && members.some((m) => m.id === ringCenter) && (
+        <RelationsRing
+          centerId={ringCenter}
+          members={members}
+          edges={edges}
+          displayNameFor={displayNameFor}
+          teamLabel={teamLabel}
+          onRecenter={setRingCenter}
+          onClose={() => setRingCenter(null)}
+        />
+      )}
       {showRanking && (
         <div
           onClick={() => setShowRanking(false)}
@@ -8873,6 +8892,189 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Connection points between every student and `centerId`: the cheapest path through
+// the web, where a two-way pick costs 1 point and a one-way pick costs 2 (a weaker
+// tie, so it counts as "further"). A one-way pick links the pair whichever way it
+// points. Plain Dijkstra — classes are small enough that the O(n²) version is
+// instant. Returns each reachable student's score plus the previous person on their
+// cheapest path (`via`), which is what the ring draws its lines along.
+function relationScores(centerId, memberIds, edges) {
+  const adj = {};
+  memberIds.forEach((id) => (adj[id] = []));
+  edges.forEach((e) => {
+    const w = e.mutual ? 1 : 2;
+    adj[e.from]?.push({ to: e.to, w });
+    adj[e.to]?.push({ to: e.from, w });
+  });
+  const dist = { [centerId]: 0 };
+  const via = {};
+  const done = new Set();
+  for (;;) {
+    let u = null;
+    Object.keys(dist).forEach((id) => {
+      if (!done.has(id) && (u === null || dist[id] < dist[u])) u = id;
+    });
+    if (u === null) break;
+    done.add(u);
+    adj[u].forEach(({ to, w }) => {
+      if (dist[to] === undefined || dist[u] + w < dist[to]) {
+        dist[to] = dist[u] + w;
+        via[to] = u;
+      }
+    });
+  }
+  return { dist, via };
+}
+
+const RING_BOX_W = 120;
+const RING_BOX_H = 40;
+
+// Popup showing one student's relations ring: them in the middle, then one ring per
+// distinct connection score — lowest score closest in, everyone with the same score on
+// the same ring — and anyone with no path at all on a dashed outer "not connected"
+// ring. Each student has a line back to the person they're reached through. Clicking
+// anyone re-centers the ring on them.
+function RelationsRing({ centerId, members, edges, displayNameFor, teamLabel, onRecenter, onClose }) {
+  const ids = members.map((m) => m.id);
+  const nameOf = (id) => {
+    const m = members.find((x) => x.id === id);
+    return m ? displayNameFor(m.id, m.name) : id;
+  };
+  const { dist, via } = relationScores(centerId, ids, edges);
+  const edgeBetween = (a, b) => edges.find((e) => (e.from === a && e.to === b) || (e.from === b && e.to === a));
+
+  // Rings, innermost first. The unreachable ring (score null) always goes last.
+  const scores = [...new Set(ids.filter((id) => id !== centerId && dist[id] !== undefined).map((id) => dist[id]))].sort((a, b) => a - b);
+  const unreachable = ids.filter((id) => dist[id] === undefined);
+  const rings = scores.map((score) => ({ score, ids: ids.filter((id) => id !== centerId && dist[id] === score) }));
+  if (unreachable.length) rings.push({ score: null, ids: unreachable });
+
+  // Each ring is at least a fixed step beyond the last, and big enough around that its
+  // boxes fit side by side. Within a ring, students are ordered by the angle of the
+  // person they're reached through, so lines fan outward instead of crisscrossing.
+  const pos = { [centerId]: { x: 0, y: 0, angle: 0 } };
+  let radius = 0;
+  rings.forEach((ring, ri) => {
+    radius = Math.max(radius + (ri === 0 ? 120 : 95), (ring.ids.length * (RING_BOX_W + 16)) / (2 * Math.PI));
+    ring.radius = radius;
+    const parentAngle = (id) => (via[id] && pos[via[id]] ? pos[via[id]].angle : 0);
+    const ordered = ring.ids.slice().sort((a, b) => parentAngle(a) - parentAngle(b) || nameOf(a).localeCompare(nameOf(b)));
+    ordered.forEach((id, i) => {
+      const angle = -Math.PI / 2 + (2 * Math.PI * i) / ordered.length + (ri % 2 ? Math.PI / ordered.length : 0);
+      pos[id] = { x: radius * Math.cos(angle), y: radius * Math.sin(angle), angle };
+    });
+  });
+  const extent = radius + RING_BOX_W / 2 + 30;
+  const truncate = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+  const pathTo = (id) => {
+    const path = [id];
+    while (via[path[0]]) path.unshift(via[path[0]]);
+    return path.map(nameOf).join(" → ");
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 18, width: 900, maxWidth: "100%", maxHeight: "92vh", display: "flex", flexDirection: "column" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div>
+            <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: inkSoft, textTransform: "uppercase" }}>Relations ring</div>
+            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 4px" }}>{nameOf(centerId)}</h3>
+            <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
+              Each ring is a connection score — the fewest points it takes to get from {nameOf(centerId)} to that student through other people. A two-way
+              pick costs 1 point, a one-way pick costs 2. Hover a student to see their path; click one to center the ring on them.
+            </p>
+          </div>
+          <button onClick={onClose} title="Close" style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "inline-flex", padding: 2 }}>
+            <X size={18} />
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 14, fontSize: 11.5, fontFamily: mono, color: inkSoft, margin: "10px 0 8px", flexWrap: "wrap" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <svg width="26" height="6">
+              <line x1="0" y1="3" x2="26" y2="3" stroke={green} strokeWidth="2" />
+            </svg>
+            two-way (1 pt)
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <svg width="26" height="6">
+              <line x1="0" y1="3" x2="26" y2="3" stroke="#9AA6B8" strokeWidth="2" strokeDasharray="4 3" />
+            </svg>
+            one-way (2 pts)
+          </span>
+          {unreachable.length > 0 && <span>{unreachable.length} not connected at all</span>}
+        </div>
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: "#fff", border: `1px solid ${line}`, borderRadius: 9 }}>
+          <svg viewBox={`${-extent} ${-extent} ${2 * extent} ${2 * extent}`} style={{ display: "block", width: "100%", height: "auto", maxHeight: "70vh" }}>
+            {rings.map((ring) => (
+              <g key={ring.score ?? "none"}>
+                <circle cx={0} cy={0} r={ring.radius} fill="none" stroke={ring.score === null ? clay : line} strokeWidth={1.5} strokeDasharray={ring.score === null ? "6 5" : undefined} />
+                <text x={0} y={-ring.radius - RING_BOX_H / 2 - 8} textAnchor="middle" fontSize={11} fontFamily={mono} fontWeight={700} fill={ring.score === null ? clay : inkSoft}>
+                  {ring.score === null ? "not connected" : `score ${ring.score}`}
+                </text>
+              </g>
+            ))}
+            {ids
+              .filter((id) => via[id])
+              .map((id) => {
+                const a = pos[via[id]];
+                const b = pos[id];
+                const mutual = edgeBetween(id, via[id])?.mutual;
+                return (
+                  <line
+                    key={`via-${id}`}
+                    x1={a.x}
+                    y1={a.y}
+                    x2={b.x}
+                    y2={b.y}
+                    stroke={mutual ? green : "#9AA6B8"}
+                    strokeWidth={mutual ? 2 : 1.6}
+                    strokeDasharray={mutual ? undefined : "5 4"}
+                    opacity={0.85}
+                  />
+                );
+              })}
+            {ids.map((id) => {
+              const p = pos[id];
+              const isCenter = id === centerId;
+              return (
+                <g key={id} transform={`translate(${p.x - RING_BOX_W / 2}, ${p.y - RING_BOX_H / 2})`} onClick={() => !isCenter && onRecenter(id)} style={{ cursor: isCenter ? "default" : "pointer" }}>
+                  <title>
+                    {isCenter
+                      ? `${nameOf(id)} · center`
+                      : dist[id] === undefined
+                      ? `${nameOf(id)} · no path`
+                      : `${nameOf(id)} · score ${dist[id]} · ${pathTo(id)}`}
+                  </title>
+                  <rect
+                    width={RING_BOX_W}
+                    height={RING_BOX_H}
+                    rx={8}
+                    fill={isCenter ? webGreenSoft : "#fff"}
+                    stroke={isCenter ? webGreen : dist[id] === undefined ? `${clay}88` : line}
+                    strokeWidth={isCenter ? 2.5 : 1}
+                  />
+                  <text x={RING_BOX_W / 2} y={17} textAnchor="middle" fontSize={12} fontWeight={700} fontFamily={sans} fill={ink}>
+                    {truncate(nameOf(id), 16)}
+                  </text>
+                  <text x={RING_BOX_W / 2} y={31} textAnchor="middle" fontSize={9.5} fontFamily={mono} fontWeight={700} fill={isCenter ? webGreen : inkSoft}>
+                    {isCenter ? "center" : `${truncate(teamLabel(id), 12)}${dist[id] !== undefined ? ` · ${dist[id]} pt${dist[id] === 1 ? "" : "s"}` : ""}`}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+      </div>
     </div>
   );
 }
