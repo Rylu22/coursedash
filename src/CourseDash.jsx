@@ -8412,16 +8412,22 @@ function WebPill({ active, onClick, children, title }) {
 // arranged around a circle — sorted by assigned team so teammates sit next to each
 // other — with an arrow toward each person they picked; a mutual pick is drawn once,
 // with heads at both ends.
-//  - By default only "successful" picks show (the two students ended up on the same
-//    team). "Show all connections" adds the ones that didn't land; "Show two-way only"
-//    hides one-way picks. The two combine.
+//  - Each of the four arrow kinds (one-/two-way × apart/together) has its own
+//    checkbox in the key; unchecking one hides just that kind. By default only the
+//    "together" kinds are checked — picks where both students ended up on one team.
 //  - Each box's team button highlights that whole team in green.
 //  - Each box's eye button narrows the board to just that student's connections (in
 //    and out). Multi-view lets several eyes be on at once (their connections combined);
 //    the view settings above still apply on top.
 function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor, teamNameFor = (i) => `Team ${i + 1}` }) {
-  const [showAll, setShowAll] = useState(false);
-  const [twoWayOnly, setTwoWayOnly] = useState(false);
+  // Which arrow kinds are shown, by WEB_EDGE_KINDS key.
+  const [shownKinds, setShownKinds] = useState(() => new Set(["oneHit", "twoHit"]));
+  const toggleKind = (key) =>
+    setShownKinds((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
   const [multi, setMulti] = useState(false);
   const [viewIds, setViewIds] = useState(() => new Set());
   const [highlightTeam, setHighlightTeam] = useState(null); // team index
@@ -8478,8 +8484,11 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
   const [ringCenter, setRingCenter] = useState(null); // student id the relations ring popup is centered on
 
   const visibleEdges = edges.filter(
-    (e) => (showAll || e.success) && (!twoWayOnly || e.mutual) && (viewIds.size === 0 || viewIds.has(e.from) || viewIds.has(e.to))
+    (e) => shownKinds.has(webEdgeKind(e).key) && (viewIds.size === 0 || viewIds.has(e.from) || viewIds.has(e.to))
   );
+  // Per-kind counts for the key ignore the checkboxes (a hidden kind still shows how
+  // many it's hiding) but respect the eye view.
+  const kindCount = (k) => edges.filter((e) => webEdgeKind(e) === k && (viewIds.size === 0 || viewIds.has(e.from) || viewIds.has(e.to))).length;
 
   // Layout only depends on who's here, who picked whom, and teams — not on names or the
   // view settings — so it's keyed on exactly that and the spring simulation doesn't
@@ -8586,13 +8595,6 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
   return (
     <div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
-        <WebPill active={showAll} onClick={() => setShowAll(!showAll)} title="Also show picks where the two students ended up on different teams">
-          Show all connections
-        </WebPill>
-        <WebPill active={twoWayOnly} onClick={() => setTwoWayOnly(!twoWayOnly)} title="Hide picks that weren't returned">
-          Show two-way only
-        </WebPill>
-        <span style={{ width: 1, alignSelf: "stretch", background: line, margin: "0 4px" }} />
         <WebPill active={multi} onClick={toggleMulti} title="Let several students' eye buttons be on at once">
           <Eye size={12} /> Multi-view
         </WebPill>
@@ -8632,17 +8634,53 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
           <Trophy size={12} /> View popularity ranking
         </WebPill>
       </div>
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11.5, fontFamily: mono, color: inkSoft, marginBottom: 10 }}>
-        {WEB_EDGE_KINDS.map((k) => (
-          <span key={k.key} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <svg width="30" height="8">
-              {k.mutual && <path d="M7,0 L0,4 L7,8 z" fill={k.color} />}
-              <line x1={k.mutual ? 6 : 1} y1="4" x2="24" y2="4" stroke={k.color} strokeWidth="1.8" />
-              <path d="M23,0 L30,4 L23,8 z" fill={k.color} />
-            </svg>
-            {k.label} ({visibleEdges.filter((e) => webEdgeKind(e) === k).length})
-          </span>
-        ))}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 11.5, fontFamily: mono, color: inkSoft, marginBottom: 10 }}>
+        {WEB_EDGE_KINDS.map((k) => {
+          const shown = shownKinds.has(k.key);
+          return (
+            <button
+              key={k.key}
+              onClick={() => toggleKind(k.key)}
+              title={shown ? `Hide ${k.label} connections` : `Show ${k.label} connections`}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                border: `1px solid ${shown ? k.color : line}`,
+                background: "#fff",
+                borderRadius: 7,
+                padding: "4px 9px 4px 6px",
+                fontFamily: mono,
+                fontSize: 11.5,
+                color: shown ? ink : inkSoft,
+                cursor: "pointer",
+                opacity: shown ? 1 : 0.6,
+              }}
+            >
+              <span
+                style={{
+                  width: 15,
+                  height: 15,
+                  borderRadius: 4,
+                  border: `1.5px solid ${shown ? k.color : "#B7C0D1"}`,
+                  background: shown ? k.color : "#fff",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                {shown && <Check size={11} color="#fff" strokeWidth={3} />}
+              </span>
+              <svg width="30" height="8">
+                {k.mutual && <path d="M7,0 L0,4 L7,8 z" fill={k.color} />}
+                <line x1={k.mutual ? 6 : 1} y1="4" x2="24" y2="4" stroke={k.color} strokeWidth="1.8" />
+                <path d="M23,0 L30,4 L23,8 z" fill={k.color} />
+              </svg>
+              {k.label} ({kindCount(k)})
+            </button>
+          );
+        })}
       </div>
       {viewIds.size > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10, fontSize: 12 }}>
@@ -8667,9 +8705,9 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
           )}
         </div>
       )}
-      {!teamResults && !showAll && (
+      {!teamResults && !shownKinds.has("oneMiss") && !shownKinds.has("twoMiss") && (
         <p style={{ fontSize: 12, color: gold, margin: "0 0 10px" }}>
-          No assignment has been run yet, so no one has ended up together — turn on "Show all connections" to see every pick.
+          No assignment has been run yet, so no one has ended up together — check the two "apart" kinds above to see every pick.
         </p>
       )}
       <div ref={scrollRef} style={{ overflow: "auto", maxHeight: WEB_VIEW_H, border: `1px solid ${line}`, borderRadius: 9, background: "#fff" }}>
