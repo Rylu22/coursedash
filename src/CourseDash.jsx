@@ -8070,22 +8070,65 @@ function GroupEditor({ code, onOpenGrid }) {
 }
 
 // ---------------- TEAM CONNECTIONS WEB ----------------
-// A real green for the Connections Web's team highlight — the palette's `green` is
-// actually the app's blue, and the highlight needs to read as distinct from the blue
-// two-way arrows.
+// A real green for the Connections Web — the palette's `green` is actually the app's
+// blue, and here blue and green have to mean two different things.
 const webGreen = "#1E9E5A";
 const webGreenSoft = "#E0F5E9";
-const WEB_BOX_W = 124;
-const WEB_BOX_H = 44;
+const WEB_BOX_W = 128;
+const WEB_BOX_H = 52;
+// Arrow color by kind: whether the pick was mutual, and whether the two students
+// actually ended up on the same team ("successful").
+const WEB_EDGE_KINDS = [
+  { key: "oneMiss", label: "one-way, apart", color: "#9AA6B8", mutual: false, success: false },
+  { key: "oneHit", label: "one-way, together", color: green, mutual: false, success: true },
+  { key: "twoMiss", label: "two-way, apart", color: clay, mutual: true, success: false },
+  { key: "twoHit", label: "two-way, together", color: webGreen, mutual: true, success: true },
+];
+const webEdgeKind = (e) => WEB_EDGE_KINDS.find((k) => k.mutual === e.mutual && k.success === e.success);
+
+// Small on/off pill used for the board's view settings.
+function WebPill({ active, onClick, children, title }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        border: `1px solid ${active ? green : line}`,
+        background: active ? greenSoft : "#fff",
+        color: active ? green : inkSoft,
+        borderRadius: 999,
+        padding: "5px 11px",
+        fontSize: 12,
+        fontWeight: 700,
+        fontFamily: sans,
+        cursor: "pointer",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 
 // Read-only board of who picked whom in a team group. Every accepted member is a box
 // arranged around a circle — sorted by assigned team so teammates sit next to each
-// other — with an arrow toward each person they picked. A mutual pick is drawn once,
-// as a blue line with heads at both ends. Clicking a student highlights their whole
-// assigned team in green and fades every arrow that doesn't touch them; clicking them
-// again (or empty board) clears it.
+// other — with an arrow toward each person they picked; a mutual pick is drawn once,
+// with heads at both ends.
+//  - By default only "successful" picks show (the two students ended up on the same
+//    team). "Show all connections" adds the ones that didn't land; "Show two-way only"
+//    hides one-way picks. The two combine.
+//  - Each box's team button highlights that whole team in green.
+//  - Each box's eye button narrows the board to just that student's connections (in
+//    and out). Multi-view lets several eyes be on at once (their connections combined);
+//    the view settings above still apply on top.
 function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor }) {
-  const [selectedId, setSelectedId] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  const [twoWayOnly, setTwoWayOnly] = useState(false);
+  const [multi, setMulti] = useState(false);
+  const [viewIds, setViewIds] = useState(() => new Set());
+  const [highlightTeam, setHighlightTeam] = useState(null); // team index
   const scrollRef = React.useRef(null);
 
   // id -> team index, "unassigned", or undefined (joined after the last run / no run yet)
@@ -8133,11 +8176,16 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
       picks(m.id).forEach((to) => {
         const mutual = picks(to).includes(m.id);
         if (mutual && m.id > to) return; // drawn from the other side
-        out.push({ from: m.id, to, mutual });
+        const success = typeof teamOf[m.id] === "number" && teamOf[m.id] === teamOf[to];
+        out.push({ from: m.id, to, mutual, success });
       });
     });
     return out;
-  }, [members, picksByStudentId]);
+  }, [members, picksByStudentId, teamOf]);
+
+  const visibleEdges = edges.filter(
+    (e) => (showAll || e.success) && (!twoWayOnly || e.mutual) && (viewIds.size === 0 || viewIds.has(e.from) || viewIds.has(e.to))
+  );
 
   // Keep the board centered when it first appears, since it's usually wider than the view.
   useEffect(() => {
@@ -8149,9 +8197,27 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
 
   if (members.length === 0) return <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", padding: "20px 0" }}>Accept some students to see their connections.</p>;
 
-  const selectedTeam = selectedId != null ? teamOf[selectedId] : undefined;
-  const highlighted = (id) =>
-    selectedId != null && (id === selectedId || (typeof selectedTeam === "number" && teamOf[id] === selectedTeam));
+  const toggleView = (id) =>
+    setViewIds((prev) => {
+      if (!multi) return prev.has(id) && prev.size === 1 ? new Set() : new Set([id]);
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  const toggleMulti = () => {
+    // Leaving multi-view can't keep several eyes on, so it falls back to none.
+    if (multi && viewIds.size > 1) setViewIds(new Set());
+    setMulti(!multi);
+  };
+  const selectAll = () => {
+    setMulti(true);
+    setViewIds(new Set(members.map((m) => m.id)));
+  };
+
+  // While viewing specific students, anyone not viewed and not on the other end of a
+  // visible arrow is dimmed so the viewed students' connections stand out.
+  const connectedIds = new Set(visibleEdges.flatMap((e) => [e.from, e.to]));
+  const dimmed = (id) => viewIds.size > 0 && !viewIds.has(id) && !connectedIds.has(id);
 
   // Trims a center-to-center line back to the edges of both boxes, leaving a small gap
   // so arrowheads land just outside the box instead of underneath it.
@@ -8165,40 +8231,48 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
     return { x1: a.x + ux * edge, y1: a.y + uy * edge, x2: b.x - ux * edge, y2: b.y - uy * edge };
   };
 
-  const mutualCount = edges.filter((e) => e.mutual).length;
-  const oneWayCount = edges.length - mutualCount;
-  const arrowColor = (e) => (e.mutual ? green : "#8C9AB0");
-
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-        <p style={{ fontSize: 12, color: inkSoft, margin: 0 }}>
-          Each arrow points from a student to someone they picked. Click a student to highlight their team.
-        </p>
-        <div style={{ display: "flex", gap: 14, fontSize: 11.5, fontFamily: mono, color: inkSoft }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <svg width="26" height="8">
-              <line x1="1" y1="4" x2="20" y2="4" stroke="#8C9AB0" strokeWidth="1.5" />
-              <path d="M19,0 L26,4 L19,8 z" fill="#8C9AB0" />
-            </svg>
-            one-way ({oneWayCount})
-          </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <svg width="30" height="8">
-              <path d="M7,0 L0,4 L7,8 z" fill={green} />
-              <line x1="6" y1="4" x2="24" y2="4" stroke={green} strokeWidth="1.5" />
-              <path d="M23,0 L30,4 L23,8 z" fill={green} />
-            </svg>
-            two-way ({mutualCount})
-          </span>
-        </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+        <WebPill active={showAll} onClick={() => setShowAll(!showAll)} title="Also show picks where the two students ended up on different teams">
+          Show all connections
+        </WebPill>
+        <WebPill active={twoWayOnly} onClick={() => setTwoWayOnly(!twoWayOnly)} title="Hide picks that weren't returned">
+          Show two-way only
+        </WebPill>
+        <span style={{ width: 1, alignSelf: "stretch", background: line, margin: "0 4px" }} />
+        <WebPill active={multi} onClick={toggleMulti} title="Let several students' eye buttons be on at once">
+          <Eye size={12} /> Multi-view
+        </WebPill>
+        <WebPill active={false} onClick={selectAll} title="Turn on every student's eye button">
+          Select all
+        </WebPill>
+        {viewIds.size > 0 && (
+          <WebPill active={false} onClick={() => setViewIds(new Set())}>
+            <X size={12} /> Clear view ({viewIds.size})
+          </WebPill>
+        )}
       </div>
-      <div
-        ref={scrollRef}
-        style={{ overflow: "auto", maxHeight: 640, border: `1px solid ${line}`, borderRadius: 9, background: "#fff" }}
-      >
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11.5, fontFamily: mono, color: inkSoft, marginBottom: 10 }}>
+        {WEB_EDGE_KINDS.map((k) => (
+          <span key={k.key} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <svg width="30" height="8">
+              {k.mutual && <path d="M7,0 L0,4 L7,8 z" fill={k.color} />}
+              <line x1={k.mutual ? 6 : 1} y1="4" x2="24" y2="4" stroke={k.color} strokeWidth="1.8" />
+              <path d="M23,0 L30,4 L23,8 z" fill={k.color} />
+            </svg>
+            {k.label} ({visibleEdges.filter((e) => webEdgeKind(e) === k).length})
+          </span>
+        ))}
+      </div>
+      {!teamResults && !showAll && (
+        <p style={{ fontSize: 12, color: gold, margin: "0 0 10px" }}>
+          No assignment has been run yet, so no one has ended up together — turn on "Show all connections" to see every pick.
+        </p>
+      )}
+      <div ref={scrollRef} style={{ overflow: "auto", maxHeight: 640, border: `1px solid ${line}`, borderRadius: 9, background: "#fff" }}>
         <div
-          onClick={() => setSelectedId(null)}
+          onClick={() => setHighlightTeam(null)}
           style={{
             position: "relative",
             width: size,
@@ -8209,19 +8283,16 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
         >
           <svg width={size} height={size} style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
             <defs>
-              {[
-                { id: "web-arrow-one", color: "#8C9AB0" },
-                { id: "web-arrow-two", color: green },
-              ].map((m) => (
-                <marker key={m.id} id={m.id} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                  <path d="M0,0 L10,5 L0,10 z" fill={m.color} />
+              {WEB_EDGE_KINDS.map((k) => (
+                <marker key={k.key} id={`web-arrow-${k.key}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" fill={k.color} />
                 </marker>
               ))}
             </defs>
-            {edges.map((e) => {
+            {visibleEdges.map((e) => {
               const { x1, y1, x2, y2 } = clipToBox(pos[e.from], pos[e.to]);
-              const touches = selectedId == null || e.from === selectedId || e.to === selectedId;
-              const marker = `url(#${e.mutual ? "web-arrow-two" : "web-arrow-one"})`;
+              const kind = webEdgeKind(e);
+              const marker = `url(#web-arrow-${kind.key})`;
               return (
                 <line
                   key={`${e.from}-${e.to}`}
@@ -8229,9 +8300,9 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
                   y1={y1}
                   x2={x2}
                   y2={y2}
-                  stroke={arrowColor(e)}
-                  strokeWidth={selectedId != null && touches ? 2.2 : 1.4}
-                  opacity={touches ? 0.9 : 0.12}
+                  stroke={kind.color}
+                  strokeWidth={viewIds.size > 0 ? 2 : 1.5}
+                  opacity={0.9}
                   markerEnd={marker}
                   markerStart={e.mutual ? marker : undefined}
                 />
@@ -8239,17 +8310,15 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
             })}
           </svg>
           {ordered.map((m) => {
-            const on = highlighted(m.id);
-            const isSelected = m.id === selectedId;
+            const t = teamOf[m.id];
+            const hasTeam = typeof t === "number";
+            const on = hasTeam && highlightTeam === t;
+            const viewing = viewIds.has(m.id);
             const p = pos[m.id];
             return (
-              <button
+              <div
                 key={m.id}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  setSelectedId((cur) => (cur === m.id ? null : m.id));
-                }}
-                title={`${displayNameFor(m.id, m.name)} · ${teamLabel(m.id)}`}
+                onClick={(ev) => ev.stopPropagation()}
                 style={{
                   position: "absolute",
                   left: p.x - WEB_BOX_W / 2,
@@ -8258,25 +8327,62 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
                   height: WEB_BOX_H,
                   boxSizing: "border-box",
                   background: on ? webGreenSoft : "#fff",
-                  border: `${isSelected ? 2 : 1}px solid ${on ? webGreen : line}`,
+                  border: `${viewing ? 2 : 1}px solid ${on ? webGreen : viewing ? green : line}`,
                   borderRadius: 8,
                   boxShadow: "0 1px 3px rgba(19,34,56,0.08)",
-                  cursor: "pointer",
-                  padding: "4px 8px",
+                  padding: "4px 6px",
                   fontFamily: sans,
-                  textAlign: "center",
                   display: "flex",
                   flexDirection: "column",
                   justifyContent: "center",
-                  gap: 2,
-                  transition: "background .12s, border-color .12s",
+                  gap: 4,
+                  opacity: dimmed(m.id) ? 0.4 : 1,
+                  transition: "background .12s, border-color .12s, opacity .12s",
                 }}
               >
-                <span style={{ fontSize: 12.5, fontWeight: 700, color: ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                <span
+                  title={displayNameFor(m.id, m.name)}
+                  style={{ fontSize: 12.5, fontWeight: 700, color: ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "center" }}
+                >
                   {displayNameFor(m.id, m.name)}
                 </span>
-                <span style={{ fontSize: 10.5, fontFamily: mono, fontWeight: 700, color: on ? webGreen : inkSoft, whiteSpace: "nowrap" }}>{teamLabel(m.id)}</span>
-              </button>
+                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 5 }}>
+                  <button
+                    onClick={() => hasTeam && setHighlightTeam(on ? null : t)}
+                    disabled={!hasTeam}
+                    title={hasTeam ? `Highlight ${teamLabel(m.id)}` : undefined}
+                    style={{
+                      border: `1px solid ${on ? webGreen : line}`,
+                      background: on ? webGreen : hasTeam ? "#F6F9FC" : "transparent",
+                      color: on ? "#fff" : inkSoft,
+                      borderRadius: 5,
+                      padding: "1px 7px",
+                      fontSize: 10.5,
+                      fontFamily: mono,
+                      fontWeight: 700,
+                      whiteSpace: "nowrap",
+                      cursor: hasTeam ? "pointer" : "default",
+                    }}
+                  >
+                    {teamLabel(m.id)}
+                  </button>
+                  <button
+                    onClick={() => toggleView(m.id)}
+                    title={viewing ? "Stop viewing their connections" : "Show only their connections"}
+                    style={{
+                      border: `1px solid ${viewing ? green : line}`,
+                      background: viewing ? green : "#fff",
+                      color: viewing ? "#fff" : inkSoft,
+                      borderRadius: 5,
+                      padding: "2px 4px",
+                      display: "inline-flex",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Eye size={11} />
+                  </button>
+                </div>
+              </div>
             );
           })}
         </div>
