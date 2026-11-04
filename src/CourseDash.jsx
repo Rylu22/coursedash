@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
-  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown, Network, Minus,
+  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown, Network, Minus, Trophy, Star, LayoutList,
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient.js";
 
@@ -164,11 +164,20 @@ function normalizeGroup(g) {
     pickCount: g.pickCount || 3,
     // Team mode only: the outcome of the most recent "Run Assignment" — see assignTeams.
     teamResults: g.teamResults || null,
+    // Team mode only: teacher-chosen names by team position (index 0 = the first team).
+    // Kept on the group rather than inside teamResults so re-running the assignment
+    // doesn't wipe them; a missing or blank entry falls back to "Team N" (teamName).
+    teamNames: g.teamNames || [],
     resultsFinalized: !!g.resultsFinalized,
     publishedAt: g.publishedAt || null,
     publishedResults: g.publishedResults || null,
     extraQuestions: g.extraQuestions || [],
   };
+}
+
+// A team's display name: whatever the teacher named it, or "Team N" by default.
+function teamName(group, index) {
+  return group?.teamNames?.[index]?.trim() || `Team ${index + 1}`;
 }
 
 // ---- Published vs. working results ----
@@ -4188,6 +4197,9 @@ function QuickFillGrid({ code }) {
 // checkmark (unordered, all three equal) instead of placing a ranked "Choice N" token,
 // and there's no drag — a checkbox has nothing meaningful to drag between cells.
 function TeamQuickFillGrid({ code }) {
+  const [viewMode, setViewMode] = useState("grid"); // "grid" | "list" — list lines each row's picks up next to their name
+  const [groupSizeMin, setGroupSizeMin] = useState(3); // "Grouped" auto fill: friend group size range
+  const [groupSizeMax, setGroupSizeMax] = useState(5);
   const [group, setGroup] = useState(null);
   const [rows, setRows] = useState([]);
   const [allTestStudents, setAllTestStudents] = useState([]);
@@ -4296,6 +4308,62 @@ function TeamQuickFillGrid({ code }) {
         return { ...r, picks: [...chosenIds] };
       })
     );
+  };
+
+  // "Grouped": splits the grid into random friend groups (sizes drawn from the
+  // admin's min–max range) and fills picks mostly from inside each student's own group,
+  // with some picks reaching into other groups — like a real class of overlapping
+  // friend circles. On top of that, every group is guaranteed at least one pick into
+  // the next group around a ring, so the whole class is one connected web rather than
+  // isolated islands. If the student count can't be split exactly within the range, the
+  // last too-small group's members are folded into the other groups instead.
+  const autoFillGrouped = () => {
+    if (rows.length < 2) return;
+    const lo = Math.max(2, Math.min(groupSizeMin, groupSizeMax));
+    const hi = Math.max(lo, groupSizeMax);
+    const order = shuffled(rows.map((r) => r.studentId));
+    const groups = [];
+    for (let i = 0; i < order.length; ) {
+      const size = lo + Math.floor(Math.random() * (hi - lo + 1));
+      groups.push(order.slice(i, i + size));
+      i += size;
+    }
+    if (groups.length > 1 && groups[groups.length - 1].length < lo) {
+      groups.pop().forEach((id) => groups[Math.floor(Math.random() * groups.length)].push(id));
+    }
+    const groupIndexOf = {};
+    groups.forEach((g, gi) => g.forEach((id) => (groupIndexOf[id] = gi)));
+
+    const IN_GROUP_CHANCE = 0.8;
+    const picksById = {};
+    order.forEach((id) => {
+      const need = effectivePickCount(pickCount, order.length - 1);
+      const inside = shuffled(groups[groupIndexOf[id]].filter((o) => o !== id));
+      const outside = shuffled(order.filter((o) => groupIndexOf[o] !== groupIndexOf[id]));
+      const chosen = [];
+      while (chosen.length < need && (inside.length || outside.length)) {
+        const fromInside = inside.length > 0 && (outside.length === 0 || Math.random() < IN_GROUP_CHANCE);
+        chosen.push((fromInside ? inside : outside).pop());
+      }
+      picksById[id] = chosen;
+    });
+
+    if (groups.length > 1) {
+      groups.forEach((g, gi) => {
+        const next = new Set(groups[(gi + 1) % groups.length]);
+        if (g.some((id) => picksById[id].some((c) => next.has(c)))) return;
+        const member = g[Math.floor(Math.random() * g.length)];
+        const picks = picksById[member];
+        if (picks.length === 0) return;
+        // Swap out an outside pick if they have one (keeps their own group tight),
+        // otherwise any pick.
+        const outsideAt = picks.findIndex((c) => groupIndexOf[c] !== gi);
+        const at = outsideAt >= 0 ? outsideAt : Math.floor(Math.random() * picks.length);
+        const target = [...next].filter((c) => !picks.includes(c));
+        if (target.length) picks[at] = target[Math.floor(Math.random() * target.length)];
+      });
+    }
+    updateRows((prev) => prev.map((r) => ({ ...r, picks: picksById[r.studentId] || [] })));
   };
 
   const addStudentRow = (student) => {
@@ -4434,6 +4502,30 @@ function TeamQuickFillGrid({ code }) {
                 Biased
               </Btn>
             </div>
+            <Btn tone="ghost" onClick={autoFillGrouped} disabled={rows.length < 2} full>
+              Grouped
+            </Btn>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: inkSoft }}>
+              <span>Friend groups of</span>
+              <input
+                type="number"
+                min={2}
+                value={groupSizeMin}
+                onChange={(e) => setGroupSizeMin(Math.max(2, Math.round(Number(e.target.value)) || 2))}
+                title="Smallest friend group"
+                style={{ width: 38, border: `1px solid ${line}`, borderRadius: 5, padding: "3px 4px", fontFamily: mono, fontSize: 12, textAlign: "center" }}
+              />
+              <span>to</span>
+              <input
+                type="number"
+                min={2}
+                value={groupSizeMax}
+                onChange={(e) => setGroupSizeMax(Math.max(2, Math.round(Number(e.target.value)) || 2))}
+                title="Largest friend group"
+                style={{ width: 38, border: `1px solid ${line}`, borderRadius: 5, padding: "3px 4px", fontFamily: mono, fontSize: 12, textAlign: "center" }}
+              />
+            </div>
+            {groupSizeMin > groupSizeMax && <span style={{ fontSize: 10.5, color: gold }}>Min is above max — Grouped will use groups of {groupSizeMax}.</span>}
             {rows.length > 0 && rows.length < 2 && <span style={{ fontSize: 10.5, color: inkSoft }}>Needs at least 2 students in the grid.</span>}
           </div>
 
@@ -4514,6 +4606,90 @@ function TeamQuickFillGrid({ code }) {
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+            {[
+              { key: "grid", label: "Grid", icon: LayoutGrid },
+              { key: "list", label: "Picks in a row", icon: LayoutList },
+            ].map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                onClick={() => setViewMode(key)}
+                style={{
+                  border: `1px solid ${viewMode === key ? green : line}`,
+                  background: viewMode === key ? greenSoft : "#fff",
+                  color: viewMode === key ? green : inkSoft,
+                  borderRadius: 7,
+                  padding: "6px 12px",
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                  fontFamily: sans,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                <Icon size={13} /> {label}
+              </button>
+            ))}
+          </div>
+          {viewMode === "list" ? (
+            <div style={{ background: "#fff", border: `1px solid ${line}`, borderRadius: 10 }}>
+              {rows.length === 0 && <div style={{ padding: "18px 12px", color: inkSoft, fontSize: 13 }}>No students added yet — use "Add test student" in the sidebar.</div>}
+              {rows.map((r, ri) => {
+                const status = rowStatus(r);
+                const nameOf = (id) => rows.find((o) => o.studentId === id)?.name || id;
+                const addable = rows.filter((o) => o.studentId !== r.studentId && !r.picks.includes(o.studentId));
+                return (
+                  <div
+                    key={r.studentId}
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderTop: ri === 0 ? "none" : `1px solid ${line}`, flexWrap: "wrap" }}
+                  >
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, width: 170, flexShrink: 0, fontSize: 13 }}>
+                      {status === "full" && <Check size={13} color={green} />}
+                      {status === "partial" && <AlertTriangle size={13} color={clay} />}
+                      <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                    </span>
+                    <span style={{ color: inkSoft, fontSize: 12 }}>→</span>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", flex: 1, minWidth: 0 }}>
+                      {r.picks.map((id) => (
+                        <span
+                          key={id}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 4, background: greenSoft, color: green, border: `1px solid ${green}55`, borderRadius: 6, padding: "3px 6px 3px 9px", fontSize: 12.5, fontWeight: 600 }}
+                        >
+                          {nameOf(id)}
+                          <button
+                            onClick={() => togglePick(r.studentId, id)}
+                            title="Remove this pick"
+                            style={{ background: "none", border: "none", color: green, cursor: "pointer", display: "inline-flex", padding: 0 }}
+                          >
+                            <X size={12} />
+                          </button>
+                        </span>
+                      ))}
+                      {r.picks.length < requiredPicks && addable.length > 0 && (
+                        <select
+                          value=""
+                          onChange={(e) => e.target.value && togglePick(r.studentId, e.target.value)}
+                          style={{ border: `1px dashed ${line}`, borderRadius: 6, padding: "4px 6px", fontSize: 12.5, fontFamily: sans, background: "#fff", color: inkSoft }}
+                        >
+                          <option value="">+ Add pick ({r.picks.length}/{requiredPicks})</option>
+                          {addable.map((o) => (
+                            <option key={o.studentId} value={o.studentId}>
+                              {o.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    <IconBtn tone="clay" title="Remove row" onClick={() => removeRow(r.studentId)}>
+                      <X size={12} />
+                    </IconBtn>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
           <div style={{ overflowX: "auto", background: "#fff", border: `1px solid ${line}`, borderRadius: 10 }}>
             <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 200 + rows.length * 90 }}>
               <thead>
@@ -4600,6 +4776,7 @@ function TeamQuickFillGrid({ code }) {
               </tbody>
             </table>
           </div>
+          )}
         </div>
       </div>
     </div>
@@ -8242,7 +8419,7 @@ function WebPill({ active, onClick, children, title }) {
 //  - Each box's eye button narrows the board to just that student's connections (in
 //    and out). Multi-view lets several eyes be on at once (their connections combined);
 //    the view settings above still apply on top.
-function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor }) {
+function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor, teamNameFor = (i) => `Team ${i + 1}` }) {
   const [showAll, setShowAll] = useState(false);
   const [twoWayOnly, setTwoWayOnly] = useState(false);
   const [multi, setMulti] = useState(false);
@@ -8261,7 +8438,7 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
   }, [teamResults]);
   const teamLabel = (id) => {
     const t = teamOf[id];
-    if (typeof t === "number") return `Team ${t + 1}`;
+    if (typeof t === "number") return teamNameFor(t);
     if (t === "unassigned") return "Unassigned";
     return teamResults ? "Not in last run" : "No team yet";
   };
@@ -8287,6 +8464,17 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
     });
     return out;
   }, [members, picksByStudentId, teamOf]);
+
+  // Popularity: how many current members picked this student — counted from every
+  // pick, regardless of which connections the view settings are showing.
+  const popularity = useMemo(() => {
+    const ids = new Set(members.map((m) => m.id));
+    const counts = {};
+    members.forEach((m) => (counts[m.id] = 0));
+    members.forEach((m) => new Set(picksByStudentId[m.id]?.choices || []).forEach((c) => c !== m.id && ids.has(c) && counts[c]++));
+    return counts;
+  }, [members, picksByStudentId]);
+  const [showRanking, setShowRanking] = useState(false);
 
   const visibleEdges = edges.filter(
     (e) => (showAll || e.success) && (!twoWayOnly || e.mutual) && (viewIds.size === 0 || viewIds.has(e.from) || viewIds.has(e.to))
@@ -8438,6 +8626,11 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
           </WebPill>
         </div>
       </div>
+      <div style={{ marginBottom: 8 }}>
+        <WebPill active={showRanking} onClick={() => setShowRanking(true)} title="Everyone ranked by how many people picked them">
+          <Trophy size={12} /> View popularity ranking
+        </WebPill>
+      </div>
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11.5, fontFamily: mono, color: inkSoft, marginBottom: 10 }}>
         {WEB_EDGE_KINDS.map((k) => (
           <span key={k.key} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
@@ -8450,6 +8643,22 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
           </span>
         ))}
       </div>
+      {viewIds.size > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10, fontSize: 12 }}>
+          <span style={{ color: inkSoft, fontWeight: 700 }}>Popularity:</span>
+          {viewIds.size <= 12 ? (
+            ordered
+              .filter((m) => viewIds.has(m.id))
+              .map((m) => (
+                <span key={m.id} style={{ background: goldSoft, color: gold, borderRadius: 5, padding: "2px 8px", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  {displayNameFor(m.id, m.name)} <Star size={11} fill={gold} /> {popularity[m.id]}
+                </span>
+              ))
+          ) : (
+            <span style={{ color: inkSoft }}>{viewIds.size} students selected — each one's score is on their box, or open the ranking.</span>
+          )}
+        </div>
+      )}
       {!teamResults && !showAll && (
         <p style={{ fontSize: 12, color: gold, margin: "0 0 10px" }}>
           No assignment has been run yet, so no one has ended up together — turn on "Show all connections" to see every pick.
@@ -8530,6 +8739,29 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
                   transition: "background .12s, border-color .12s, opacity .12s",
                 }}
               >
+                {viewing && (
+                  <span
+                    title={`Picked by ${popularity[m.id]} student${popularity[m.id] === 1 ? "" : "s"}`}
+                    style={{
+                      position: "absolute",
+                      top: -9,
+                      right: -9,
+                      background: gold,
+                      color: "#fff",
+                      borderRadius: 999,
+                      padding: "1px 6px",
+                      fontSize: 10.5,
+                      fontFamily: mono,
+                      fontWeight: 700,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 2,
+                      boxShadow: "0 1px 3px rgba(19,34,56,0.2)",
+                    }}
+                  >
+                    <Star size={9} fill="#fff" /> {popularity[m.id]}
+                  </span>
+                )}
                 <span
                   title={displayNameFor(m.id, m.name)}
                   style={{ fontSize: 12.5, fontWeight: 700, color: ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "center" }}
@@ -8551,6 +8783,9 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
                       fontFamily: mono,
                       fontWeight: 700,
                       whiteSpace: "nowrap",
+                      maxWidth: 88,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
                       cursor: hasTeam ? "pointer" : "default",
                     }}
                   >
@@ -8578,6 +8813,66 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
         </div>
         </div>
       </div>
+      {showRanking && (
+        <div
+          onClick={() => setShowRanking(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(19,34,56,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 420, maxWidth: "100%", maxHeight: "85vh", display: "flex", flexDirection: "column" }}
+          >
+            <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: inkSoft, textTransform: "uppercase" }}>Connections Web</div>
+            <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 4px", display: "flex", alignItems: "center", gap: 7 }}>
+              <Trophy size={17} color={gold} /> Popularity ranking
+            </h3>
+            <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 12px" }}>
+              Popularity = how many students picked them. Students with the same score share a rank. Click a student to view their connections.
+            </p>
+            <div style={{ overflowY: "auto", border: `1px solid ${line}`, borderRadius: 8, background: "#fff" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                <tbody>
+                  {(() => {
+                    const ranked = members
+                      .slice()
+                      .sort((a, b) => popularity[b.id] - popularity[a.id] || displayNameFor(a.id, a.name).localeCompare(displayNameFor(b.id, b.name)));
+                    // Standard competition ranking: ties share a rank, and the next
+                    // rank skips ahead by however many tied (1, 2, 2, 4…).
+                    let rank = 0;
+                    return ranked.map((m, i) => {
+                      if (i === 0 || popularity[m.id] !== popularity[ranked[i - 1].id]) rank = i + 1;
+                      return (
+                        <tr
+                          key={m.id}
+                          onClick={() => {
+                            setViewIds((prev) => (multi ? new Set([...prev, m.id]) : new Set([m.id])));
+                            setShowRanking(false);
+                          }}
+                          style={{ background: i % 2 ? "#fff" : "#F6F9FC", cursor: "pointer" }}
+                        >
+                          <td style={{ padding: "7px 10px", fontFamily: mono, fontWeight: 700, color: rank <= 3 ? gold : inkSoft, width: 34 }}>#{rank}</td>
+                          <td style={{ padding: "7px 6px", fontWeight: 600, color: ink }}>{displayNameFor(m.id, m.name)}</td>
+                          <td style={{ padding: "7px 6px", fontFamily: mono, fontSize: 11, color: inkSoft, whiteSpace: "nowrap" }}>{teamLabel(m.id)}</td>
+                          <td style={{ padding: "7px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
+                            <span style={{ background: goldSoft, color: gold, borderRadius: 5, padding: "2px 8px", fontWeight: 700, fontFamily: mono, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                              <Star size={10} fill={gold} /> {popularity[m.id]}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <Btn tone="ghost" onClick={() => setShowRanking(false)}>
+                Close
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -8606,6 +8901,8 @@ function TeamGroupEditor({ code }) {
   const [dragStudent, setDragStudent] = useState(null); // { studentId, fromTeamIndex } — fromTeamIndex null = from Unassigned
   const [dragOverId, setDragOverId] = useState(null); // team index, or "unassigned", currently hovered
   const [explainFor, setExplainFor] = useState(null); // { student, teamIndex }
+  const [renamingTeam, setRenamingTeam] = useState(null); // team index whose name is being edited
+  const [teamNameDraft, setTeamNameDraft] = useState("");
   const [chain, setChain] = useState(null);
   const [priorGroupOptions, setPriorGroupOptions] = useState([]); // [{code, name}] for this series, most recent first
   const [expandedMember, setExpandedMember] = useState(null); // member id currently expanded in the Students list
@@ -8870,6 +9167,18 @@ function TeamGroupEditor({ code }) {
     setRenamingMemberId(null);
     setRenameDraft("");
   };
+  // Team names live on the group by position, so they carry over a re-run. Saving a
+  // blank name clears it back to the "Team N" default.
+  const saveTeamName = async (index) => {
+    const names = group.teamNames.slice();
+    while (names.length <= index) names.push("");
+    names[index] = teamNameDraft.trim();
+    const updated = { ...group, teamNames: names };
+    setGroup(updated);
+    setRenamingTeam(null);
+    await storeSet(`group:${code}`, updated, true);
+  };
+
   const saveMemberOverrides = async (nextOverrides) => {
     const updated = { ...group, studentNameOverrides: nextOverrides };
     setGroup(updated);
@@ -9492,7 +9801,7 @@ function TeamGroupEditor({ code }) {
                 <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
                   {settings.customSizes.map((size, i) => (
                     <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 12.5, color: inkSoft, width: 60, flexShrink: 0 }}>Team {i + 1}</span>
+                      <span style={{ fontSize: 12.5, color: inkSoft, width: 90, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={teamName(group, i)}>{teamName(group, i)}</span>
                       <input
                         type="number"
                         min={0}
@@ -9696,7 +10005,7 @@ function TeamGroupEditor({ code }) {
         )}
 
         {tab === "connections" && (
-          <ConnectionsWeb members={members} picksByStudentId={picksByStudentId} teamResults={group.teamResults} displayNameFor={displayNameFor} />
+          <ConnectionsWeb members={members} picksByStudentId={picksByStudentId} teamResults={group.teamResults} displayNameFor={displayNameFor} teamNameFor={(i) => teamName(group, i)} />
         )}
 
         {tab === "results" && (
@@ -9776,7 +10085,42 @@ function TeamGroupEditor({ code }) {
                             }}
                           >
                             <div style={{ background: isOver ? "transparent" : greenSoft, padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                              <span style={{ fontFamily: serif, fontSize: 15.5, fontWeight: 700, color: green }}>Team {i + 1}</span>
+                              {renamingTeam === i ? (
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                                  <input
+                                    autoFocus
+                                    value={teamNameDraft}
+                                    onChange={(e) => setTeamNameDraft(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") saveTeamName(i);
+                                      if (e.key === "Escape") setRenamingTeam(null);
+                                    }}
+                                    placeholder={`Team ${i + 1}`}
+                                    maxLength={40}
+                                    style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "3px 7px", fontSize: 13.5, fontFamily: serif, width: 170 }}
+                                  />
+                                  <button onClick={() => saveTeamName(i)} title="Save" style={{ background: "none", border: "none", color: green, cursor: "pointer", display: "inline-flex", padding: 0 }}>
+                                    <Check size={15} />
+                                  </button>
+                                  <button onClick={() => setRenamingTeam(null)} title="Cancel" style={{ background: "none", border: "none", color: clay, cursor: "pointer", display: "inline-flex", padding: 0 }}>
+                                    <X size={15} />
+                                  </button>
+                                </span>
+                              ) : (
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                                  <span style={{ fontFamily: serif, fontSize: 15.5, fontWeight: 700, color: green }}>{teamName(group, i)}</span>
+                                  <button
+                                    onClick={() => {
+                                      setRenamingTeam(i);
+                                      setTeamNameDraft(group.teamNames[i] || "");
+                                    }}
+                                    title="Rename team"
+                                    style={{ background: "none", border: "none", color: inkSoft, cursor: "pointer", display: "inline-flex", padding: 0 }}
+                                  >
+                                    <Pencil size={12} />
+                                  </button>
+                                </span>
+                              )}
                               <span style={{ fontSize: 11.5, color: inkSoft, fontFamily: mono }}>{team.length} student{team.length === 1 ? "" : "s"}</span>
                             </div>
                             {team.length === 0 ? (
@@ -9916,7 +10260,7 @@ function TeamGroupEditor({ code }) {
               <div onClick={(e) => e.stopPropagation()} style={{ background: paper, border: `1px solid ${line}`, borderRadius: 10, padding: 20, width: 380, maxWidth: "100%" }}>
                 <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: 1.5, color: inkSoft, textTransform: "uppercase" }}>How this result happened</div>
                 <h3 style={{ fontFamily: serif, fontSize: 19, margin: "4px 0 14px" }}>
-                  {s.name} → {explainFor.teamIndex != null ? `Team ${explainFor.teamIndex + 1}` : "Unassigned"}
+                  {s.name} → {explainFor.teamIndex != null ? teamName(group, explainFor.teamIndex) : "Unassigned"}
                 </h3>
                 <div style={{ fontSize: 13, color: ink, lineHeight: 1.6, display: "grid", gap: 10 }}>
                   <div>
