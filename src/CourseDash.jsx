@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Plus, X, Play, Download, Users, ClipboardList, ListOrdered, Upload,
   AlertTriangle, LogOut, Copy, ArrowLeft, RefreshCw, Check, KeyRound, GripVertical, ArrowLeftRight, Link2, Sliders,
-  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown, Network,
+  ShieldCheck, Trash2, Pencil, Info, Mail, Sparkles, Lock, CheckSquare, Search, LogIn, Compass, ChevronRight, ChevronLeft, MessageCircle, Key, Bell, GraduationCap, Eye, LayoutGrid, Undo2, Redo2, ChevronUp, ChevronDown, Network, Minus,
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient.js";
 
@@ -8076,6 +8076,125 @@ const webGreen = "#1E9E5A";
 const webGreenSoft = "#E0F5E9";
 const WEB_BOX_W = 128;
 const WEB_BOX_H = 52;
+const WEB_VIEW_H = 640; // height of the scrollable viewport the board sits in
+const WEB_ZOOM_MIN = 0.2;
+const WEB_ZOOM_MAX = 2;
+// Both layouts return box centers plus the board size needed to hold them, with
+// `margin` of breathing room on every side.
+const WEB_MARGIN = 40;
+// Ring layout: boxes evenly around a circle in the given order, with a radius big
+// enough that neighbors at the top and bottom (where they sit side by side) don't
+// overlap — the arc between two neighbors has to fit a box plus a gap.
+function webCircleLayout(ids) {
+  const n = ids.length;
+  const radius = Math.max(170, (n * (WEB_BOX_W + 18)) / (2 * Math.PI));
+  const size = 2 * radius + WEB_BOX_W + 2 * WEB_MARGIN;
+  const pos = {};
+  ids.forEach((id, i) => {
+    const angle = (2 * Math.PI * i) / Math.max(1, n) - Math.PI / 2;
+    pos[id] = { x: size / 2 + radius * Math.cos(angle), y: size / 2 + radius * Math.sin(angle) };
+  });
+  return { pos, width: size, height: size };
+}
+// Packed layout: a small spring simulation (Fruchterman–Reingold). Every box pushes
+// every other away, each pick pulls its two students together (a mutual pick twice as
+// hard), teammates pull together a little on top of that, and a pull toward the middle
+// keeps loners from drifting off — so the board settles into one dense cluster where
+// friends and teams sit near each other. Deterministic: it starts from a sunflower
+// spiral in the given (team-sorted) order rather than random positions, so the same
+// data always lands the same way. A final pass nudges apart any boxes still
+// overlapping, since the simulation treats boxes as points.
+function webClusterLayout(ids, links, teamOf) {
+  const n = ids.length;
+  const idx = {};
+  ids.forEach((id, i) => (idx[id] = i));
+  const P = ids.map((_, i) => {
+    const r = 75 * Math.sqrt(i + 0.5);
+    const a = i * 2.39996; // golden angle
+    return { x: r * Math.cos(a), y: r * Math.sin(a) };
+  });
+  const springs = links.map((e) => [idx[e.from], idx[e.to], e.mutual ? 2 : 1]);
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const t = teamOf[ids[i]];
+      if (typeof t === "number" && t === teamOf[ids[j]]) springs.push([i, j, 0.6]);
+    }
+  }
+  const k = 125; // natural spacing between connected boxes
+  const iterations = 300;
+  for (let iter = 0; iter < iterations; iter++) {
+    const maxStep = k * 0.6 * (1 - iter / iterations) + 1;
+    const D = P.map(() => ({ x: 0, y: 0 }));
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = P[i].x - P[j].x;
+        const dy = P[i].y - P[j].y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        const f = (k * k) / d;
+        D[i].x += (dx / d) * f;
+        D[i].y += (dy / d) * f;
+        D[j].x -= (dx / d) * f;
+        D[j].y -= (dy / d) * f;
+      }
+    }
+    springs.forEach(([i, j, w]) => {
+      const dx = P[i].x - P[j].x;
+      const dy = P[i].y - P[j].y;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      const f = ((d * d) / k) * w;
+      D[i].x -= (dx / d) * f;
+      D[i].y -= (dy / d) * f;
+      D[j].x += (dx / d) * f;
+      D[j].y += (dy / d) * f;
+    });
+    P.forEach((p, i) => {
+      D[i].x -= p.x * 0.9;
+      D[i].y -= p.y * 0.9;
+      const len = Math.hypot(D[i].x, D[i].y);
+      if (len > 0) {
+        const step = Math.min(len, maxStep);
+        p.x += (D[i].x / len) * step;
+        p.y += (D[i].y / len) * step;
+      }
+    });
+  }
+  // Overlap cleanup: push each still-overlapping pair apart along whichever axis needs
+  // the smaller move, until nothing overlaps (or it gives up after enough passes).
+  const gapX = WEB_BOX_W + 14;
+  const gapY = WEB_BOX_H + 14;
+  for (let pass = 0; pass < 200; pass++) {
+    let moved = false;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = P[j].x - P[i].x;
+        const dy = P[j].y - P[i].y;
+        const ox = gapX - Math.abs(dx);
+        const oy = gapY - Math.abs(dy);
+        if (ox <= 0 || oy <= 0) continue;
+        moved = true;
+        if (ox / gapX < oy / gapY) {
+          const s = (dx >= 0 ? 1 : -1) * (ox / 2 + 0.5);
+          P[i].x -= s;
+          P[j].x += s;
+        } else {
+          const s = (dy >= 0 ? 1 : -1) * (oy / 2 + 0.5);
+          P[i].y -= s;
+          P[j].y += s;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+  const minX = Math.min(...P.map((p) => p.x));
+  const minY = Math.min(...P.map((p) => p.y));
+  const maxX = Math.max(...P.map((p) => p.x));
+  const maxY = Math.max(...P.map((p) => p.y));
+  const pos = {};
+  ids.forEach((id, i) => {
+    pos[id] = { x: P[i].x - minX + WEB_BOX_W / 2 + WEB_MARGIN, y: P[i].y - minY + WEB_BOX_H / 2 + WEB_MARGIN };
+  });
+  return { pos, width: maxX - minX + WEB_BOX_W + 2 * WEB_MARGIN, height: maxY - minY + WEB_BOX_H + 2 * WEB_MARGIN };
+}
 // Arrow color by kind: whether the pick was mutual, and whether the two students
 // actually ended up on the same team ("successful").
 const WEB_EDGE_KINDS = [
@@ -8129,6 +8248,8 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
   const [multi, setMulti] = useState(false);
   const [viewIds, setViewIds] = useState(() => new Set());
   const [highlightTeam, setHighlightTeam] = useState(null); // team index
+  const [circle, setCircle] = useState(false);
+  const [zoom, setZoom] = useState(1);
   const scrollRef = React.useRef(null);
 
   // id -> team index, "unassigned", or undefined (joined after the last run / no run yet)
@@ -8149,22 +8270,6 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
     const rank = (id) => (typeof teamOf[id] === "number" ? teamOf[id] : teamOf[id] === "unassigned" ? 1e6 : 1e6 + 1);
     return members.slice().sort((a, b) => rank(a.id) - rank(b.id) || displayNameFor(a.id, a.name).localeCompare(displayNameFor(b.id, b.name)));
   }, [members, teamOf, displayNameFor]);
-
-  // Circle big enough that neighbors at the top and bottom (where they sit side by side)
-  // don't overlap: the arc between two neighbors has to fit a box plus a gap.
-  const n = ordered.length;
-  const radius = Math.max(170, (n * (WEB_BOX_W + 18)) / (2 * Math.PI));
-  const margin = 40;
-  const size = 2 * radius + WEB_BOX_W + 2 * margin;
-  const center = size / 2;
-  const pos = useMemo(() => {
-    const p = {};
-    ordered.forEach((m, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(1, n) - Math.PI / 2;
-      p[m.id] = { x: center + radius * Math.cos(angle), y: center + radius * Math.sin(angle) };
-    });
-    return p;
-  }, [ordered, n, center, radius]);
 
   // Picks of removed students (or of someone who's left) are skipped — only arrows
   // between two current members are drawn. Mutual pairs collapse into one edge.
@@ -8187,13 +8292,71 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
     (e) => (showAll || e.success) && (!twoWayOnly || e.mutual) && (viewIds.size === 0 || viewIds.has(e.from) || viewIds.has(e.to))
   );
 
-  // Keep the board centered when it first appears, since it's usually wider than the view.
+  // Layout only depends on who's here, who picked whom, and teams — not on names or the
+  // view settings — so it's keyed on exactly that and the spring simulation doesn't
+  // rerun (and reshuffle the board) every time a filter or eye is toggled.
+  const layoutKey = JSON.stringify([ordered.map((m) => m.id), edges.map((e) => [e.from, e.to, e.mutual]), ordered.map((m) => teamOf[m.id] ?? null)]);
+  const layout = useMemo(
+    () => (circle ? webCircleLayout(ordered.map((m) => m.id)) : webClusterLayout(ordered.map((m) => m.id), edges, teamOf)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [layoutKey, circle]
+  );
+  const pos = layout.pos;
+
+  // Zoom scales the whole board. Every zoom change remembers which board point sat
+  // under an anchor (the view's center for the buttons, the mouse for Ctrl+scroll) and
+  // scrolls so that same point is still there afterward, instead of jumping to a corner.
+  const zoomRef = React.useRef(zoom);
+  const zoomAnchor = React.useRef(null);
+  const zoomTo = (next, ax, ay) => {
+    const el = scrollRef.current;
+    const z = Math.min(WEB_ZOOM_MAX, Math.max(WEB_ZOOM_MIN, Math.round(next * 100) / 100));
+    if (!el || z === zoomRef.current) return;
+    const anchorX = ax ?? el.clientWidth / 2;
+    const anchorY = ay ?? el.clientHeight / 2;
+    zoomAnchor.current = { bx: (el.scrollLeft + anchorX) / zoomRef.current, by: (el.scrollTop + anchorY) / zoomRef.current, anchorX, anchorY };
+    zoomRef.current = z;
+    setZoom(z);
+  };
+  React.useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const a = zoomAnchor.current;
+    if (!el || !a) return;
+    el.scrollLeft = a.bx * zoom - a.anchorX;
+    el.scrollTop = a.by * zoom - a.anchorY;
+    zoomAnchor.current = null;
+  }, [zoom]);
+  const fitZoom = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    zoomTo(Math.min(1, (el.clientWidth - 4) / layout.width, (WEB_VIEW_H - 4) / layout.height));
+  };
+  // Ctrl/⌘ + scroll wheel (or a trackpad pinch, which browsers report the same way)
+  // zooms around the mouse. Needs a non-passive native listener so the browser's own
+  // page zoom can be prevented — React's onWheel can't do that.
+  const hasMembers = members.length > 0;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (ev) => {
+      if (!ev.ctrlKey && !ev.metaKey) return;
+      ev.preventDefault();
+      const rect = el.getBoundingClientRect();
+      zoomTo(zoomRef.current * (ev.deltaY < 0 ? 1.1 : 1 / 1.1), ev.clientX - rect.left, ev.clientY - rect.top);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMembers]);
+
+  // Re-center whenever the layout itself changes (first open, circle toggled, picks or
+  // teams changed), since the board is usually bigger than the view.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2;
     el.scrollTop = (el.scrollHeight - el.clientHeight) / 2;
-  }, [size]);
+  }, [layout]);
 
   if (members.length === 0) return <p style={{ color: inkSoft, fontSize: 13, textAlign: "center", padding: "20px 0" }}>Accept some students to see their connections.</p>;
 
@@ -8252,6 +8415,28 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
             <X size={12} /> Clear view ({viewIds.size})
           </WebPill>
         )}
+        <span style={{ width: 1, alignSelf: "stretch", background: line, margin: "0 4px" }} />
+        <WebPill active={circle} onClick={() => setCircle(!circle)} title="Arrange everyone around a ring instead of packed together">
+          Circle layout
+        </WebPill>
+        <div style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4 }} title="Ctrl + scroll (or pinch) on the board also zooms">
+          <WebPill active={false} onClick={() => zoomTo(zoom / 1.25)} title="Zoom out">
+            <Minus size={12} />
+          </WebPill>
+          <button
+            onClick={() => zoomTo(1)}
+            title="Reset to 100%"
+            style={{ background: "none", border: "none", fontFamily: mono, fontSize: 12, fontWeight: 700, color: inkSoft, cursor: "pointer", width: 46, padding: 0 }}
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <WebPill active={false} onClick={() => zoomTo(zoom * 1.25)} title="Zoom in">
+            <Plus size={12} />
+          </WebPill>
+          <WebPill active={false} onClick={fitZoom} title="Zoom out until the whole board fits">
+            Fit
+          </WebPill>
+        </div>
       </div>
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11.5, fontFamily: mono, color: inkSoft, marginBottom: 10 }}>
         {WEB_EDGE_KINDS.map((k) => (
@@ -8270,18 +8455,23 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
           No assignment has been run yet, so no one has ended up together — turn on "Show all connections" to see every pick.
         </p>
       )}
-      <div ref={scrollRef} style={{ overflow: "auto", maxHeight: 640, border: `1px solid ${line}`, borderRadius: 9, background: "#fff" }}>
+      <div ref={scrollRef} style={{ overflow: "auto", maxHeight: WEB_VIEW_H, border: `1px solid ${line}`, borderRadius: 9, background: "#fff" }}>
+        {/* Sized to the zoomed board so the scrollbars match what you see; the board
+            itself keeps its real size and is scaled down/up inside it. */}
+        <div style={{ width: layout.width * zoom, height: layout.height * zoom, margin: "0 auto", overflow: "hidden" }}>
         <div
           onClick={() => setHighlightTeam(null)}
           style={{
             position: "relative",
-            width: size,
-            height: size,
+            width: layout.width,
+            height: layout.height,
+            transform: `scale(${zoom})`,
+            transformOrigin: "0 0",
             backgroundImage: `radial-gradient(${line} 1px, transparent 1px)`,
             backgroundSize: "18px 18px",
           }}
         >
-          <svg width={size} height={size} style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+          <svg width={layout.width} height={layout.height} style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
             <defs>
               {WEB_EDGE_KINDS.map((k) => (
                 <marker key={k.key} id={`web-arrow-${k.key}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -8385,6 +8575,7 @@ function ConnectionsWeb({ members, picksByStudentId, teamResults, displayNameFor
               </div>
             );
           })}
+        </div>
         </div>
       </div>
     </div>
